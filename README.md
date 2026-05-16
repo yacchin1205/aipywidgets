@@ -26,7 +26,7 @@ AI integration, chat tools, and approval flows.
 During early development, install from a local checkout:
 
 ```bash
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 Open JupyterLab:

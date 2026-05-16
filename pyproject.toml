@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aipywidgets"
+version = "0.1.0"
+description = "AI-assisted form widgets for Jupyter Notebook and JupyterLab"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Satoshi Yazawa" },
+]
+dependencies = [
+    "ipywidgets>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyterlab>=4.0",
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
