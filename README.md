@@ -21,6 +21,44 @@ Raw `ipywidgets` gives developers low-level UI components.
 `aipywidgets` adds a thin layer for form schemas, state management, input events,
 AI integration, chat tools, and approval flows.
 
+## Getting Started
+
+During early development, install from a local checkout:
+
+```bash
+pip install -e .
+```
+
+Open JupyterLab:
+
+```bash
+jupyter lab
+```
+
+Create and display a form in a notebook:
+
+```python
+from aipywidgets import AIForm, fields
+
+form = AIForm(
+    title="Paper metadata",
+    fields=[
+        fields.Text("doi", label="DOI"),
+        fields.Text("title", label="Title"),
+        fields.Int("year", label="Year"),
+    ],
+)
+
+form
+```
+
+Read and update values from Python:
+
+```python
+form.get_values()
+form.set_value("title", "Example paper")
+```
+
 ## Use Cases
 
 - Paper metadata entry, such as DOI, title, authors, publication year, and abstract
@@ -93,6 +131,38 @@ form = AIForm(
     ],
 )
 ```
+
+## Actions
+
+Forms can define explicit user actions such as saving, submitting, or depositing
+metadata. Action labels are defined in the form schema, while Python handlers are
+registered by action id.
+
+```python
+from aipywidgets import Action
+
+form = AIForm(
+    title="Dataset deposit",
+    steps=[...],
+    actions=[
+        Action(
+            id="deposit",
+            label="Deposit",
+            style="primary",
+            requires_confirmation=True,
+        ),
+    ],
+)
+
+@form.on_action("deposit")
+def deposit(ctx):
+    result = deposit_to_repository(ctx.values)
+    ctx.info(f"Deposited: {result.url}")
+```
+
+Actions are user-triggered UI operations. They are separate from chat tools:
+the assistant can help prepare metadata, but final operations such as deposit
+should run through an explicit action.
 
 ## Field Types
 
@@ -292,6 +362,42 @@ will focus on:
 AI-generated changes should be reviewable by default. The intended behavior is
 to present proposed changes and apply them only after user approval.
 
+## Credentials
+
+AI credentials should be supplied at runtime and kept out of notebooks, form
+definitions, and repositories. `aipywidgets` should support a few paths because
+notebooks, Binder, Voila, and local development have different UI constraints.
+
+For Binder and Voila, the preferred path is a widget-based credential prompt:
+
+```python
+from aipywidgets import AIConfig
+
+ai = AIConfig.from_user_input(
+    model="gpt-4.1-mini",
+    base_url="https://api.openai.com/v1",
+)
+```
+
+This should render a small `ipywidgets.Password`-based UI and keep the API key
+only in the active kernel session.
+
+For advanced use, developers can pass an already configured OpenAI-compatible
+client:
+
+```python
+from openai import OpenAI
+from aipywidgets import AIConfig
+
+ai = AIConfig(
+    client=OpenAI(api_key=api_key, base_url=base_url),
+    model="gpt-4.1-mini",
+)
+```
+
+For local development, environment variables can also be used. User config files
+are not part of the MVP.
+
 ## Chat Assistant
 
 A form can display a chat window in the lower-left or lower-right corner.
@@ -363,6 +469,7 @@ The MVP should include:
 - Field paths for nested reads, writes, hooks, and selections
 - Single-page forms
 - Wizard-style step display
+- User actions for save, submit, deposit, or other explicit operations
 - Reading and setting form values
 - Python hooks
 - Hook cycle detection
@@ -394,6 +501,7 @@ The internal design is expected to separate the following responsibilities:
 - `AIForm`: the main API for display, events, and hook registration
 - `HookContext`: context passed to hook functions
 - `HookRunner`: hook execution, dependency tracking, and cycle detection
+- `Action`: user-triggered operations with labels and Python handlers
 - `AIHook`: prompt, input values, and output field definitions
 - `ChatPanel`: chat UI
 - `ToolRegistry`: tools callable from chat
