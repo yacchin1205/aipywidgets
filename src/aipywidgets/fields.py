@@ -90,7 +90,11 @@ class Tags(Field):
     def make_widget(self):
         import ipywidgets as widgets
 
-        return widgets.TagsInput(description=self.label or self.id, value=list(self.default))
+        return widgets.TagsInput(
+            description=self.label or self.id,
+            value=list(self.default),
+            layout=widgets.Layout(width="300px"),
+        )
 
 
 @dataclass

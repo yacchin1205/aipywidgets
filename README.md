@@ -14,7 +14,7 @@ chat-based assistance.
 `aipywidgets` brings three ideas into a single form experience:
 
 1. Composite fields and wizard-style multi-step forms
-2. Dynamic form behavior through Python hooks and AI hooks
+2. Dynamic form behavior through Python hooks and AI assists
 3. A chat assistant that can inspect form state and propose approved edits
 
 Raw `ipywidgets` gives developers low-level UI components.
@@ -329,14 +329,20 @@ def update_title(ctx):
 The error should include the field path chain that caused the cycle, so the
 developer can decide which hook owns the derived value.
 
-## AI Hooks
+## AI Assists
 
-In addition to traditional Python hooks, developers can define prompt-based AI
-hooks.
+AI behavior is not a Python `on_change` hook. Python hooks are immediate and
+deterministic; AI assists are delayed proposal generators tied to stable form
+state.
 
 ```python
-form.ai.on_change(
-    "abstract",
+from aipywidgets import WhenIdle
+
+form.ai.assist(
+    id="suggest_keywords",
+    label="Suggest keywords",
+    watch=["abstract"],
+    trigger=WhenIdle(ms=1200, min_chars=80),
     prompt="""
     The user entered the following abstract.
     Suggest 3 to 6 concise keywords.
@@ -350,7 +356,7 @@ form.ai.on_change(
 )
 ```
 
-AI hooks are designed for OpenAI-compatible clients. The first implementation
+AI assists are designed for OpenAI-compatible clients. The first implementation
 will focus on:
 
 - Completing one field from existing form values
@@ -362,28 +368,19 @@ will focus on:
 AI-generated changes should be reviewable by default. The intended behavior is
 to present proposed changes and apply them only after user approval.
 
+The current prototype creates one pending proposal per assist. If watched input
+changes after a proposal is created, the proposal becomes stale and cannot be
+accepted. A later stable input state replaces the stale proposal.
+
+In the widget UI, assist status and proposals are shown as a floating bubble
+near the field that currently has the user's attention. The bubble is not part
+of the form layout, so enabling an assist should not make the field list appear
+to gain extra form items.
+
 ## Credentials
 
-AI credentials should be supplied at runtime and kept out of notebooks, form
-definitions, and repositories. `aipywidgets` should support a few paths because
-notebooks, Binder, Voila, and local development have different UI constraints.
-
-For Binder and Voila, the preferred path is a widget-based credential prompt:
-
-```python
-from aipywidgets import AIConfig
-
-ai = AIConfig.from_user_input(
-    model="gpt-4.1-mini",
-    base_url="https://api.openai.com/v1",
-)
-```
-
-This should render a small `ipywidgets.Password`-based UI and keep the API key
-only in the active kernel session.
-
-For advanced use, developers can pass an already configured OpenAI-compatible
-client:
+`aipywidgets` does not collect, render, store, or persist API keys. Pass an
+already configured OpenAI-compatible client instead:
 
 ```python
 from openai import OpenAI
@@ -391,12 +388,13 @@ from aipywidgets import AIConfig
 
 ai = AIConfig(
     client=OpenAI(api_key=api_key, base_url=base_url),
-    model="gpt-4.1-mini",
+    model="gpt-5.4-mini",
 )
 ```
 
-For local development, environment variables can also be used. User config files
-are not part of the MVP.
+Credential handling belongs to the caller or deployment layer. Avoid
+`ipywidgets.Password` for API keys because widget state may be saved in
+notebooks.
 
 ## Chat Assistant
 
@@ -473,7 +471,7 @@ The MVP should include:
 - Reading and setting form values
 - Python hooks
 - Hook cycle detection
-- Minimal AI hooks
+- Minimal AI assists
 - Chat UI display
 - A chat tool for reading current form values
 - A chat tool for proposing updates
@@ -502,7 +500,7 @@ The internal design is expected to separate the following responsibilities:
 - `HookContext`: context passed to hook functions
 - `HookRunner`: hook execution, dependency tracking, and cycle detection
 - `Action`: user-triggered operations with labels and Python handlers
-- `AIHook`: prompt, input values, and output field definitions
+- `AIAssist`: watched inputs, stable-state triggers, prompts, and output fields
 - `ChatPanel`: chat UI
 - `ToolRegistry`: tools callable from chat
 - `Approval`: review, accept, reject, and apply flow for AI-generated proposals

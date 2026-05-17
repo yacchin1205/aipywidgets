@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from html import escape
 from typing import Any
 
 from .actions import Action
+from .ai import AIAssistManager, AIProposalRunner, PatchProposal
 from .field_path import get_in, parse_field_path, set_in
 from .fields import Array, Field, Object
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,13 +81,22 @@ class AIForm:
         self.fields = fields or []
         self.steps = steps or []
         self.actions = actions or []
-        self.ai = ai
+        self.ai_config = ai
+        self.ai = AIAssistManager(self)
         self._validate_schema()
         self._values = self._initial_values()
         self._widgets: dict[str, Any] = {}
         self._hooks: dict[str, list[Callable[[HookContext], None]]] = {}
         self._action_handlers: dict[str, Callable[[ActionContext], None]] = {}
         self._active_hook_paths: list[str] = []
+        self._ai_runner = AIProposalRunner(self)
+        self.proposals: list[PatchProposal] = []
+        self.approval_events: list[dict[str, Any]] = []
+        self._attention_path: str | None = None
+        self._assist_state: dict[str, str] = {}
+        self._assist_attention: dict[str, str] = {}
+        self._assist_errors: dict[str, BaseException] = {}
+        self._assist_surfaces: dict[str, Any] = {}
         self._message_widget = None
 
     def get_values(self) -> dict[str, Any]:
@@ -126,6 +140,62 @@ class AIForm:
 
     def error(self, message: str) -> None:
         self._set_message(message, kind="error")
+
+    def accept_proposal(self, index: int) -> None:
+        proposal = self._proposal_at(index)
+        if proposal.stale:
+            raise RuntimeError("Cannot accept a stale AI proposal")
+        for operation in proposal.operations:
+            self.set_value(operation.path, operation.value)
+        self.approval_events.append({"status": "accepted", "proposal": proposal})
+        del self.proposals[index]
+        if proposal.assist_id is not None:
+            self._assist_state[proposal.assist_id] = "accepted"
+            self._clear_assist_surfaces()
+
+    def reject_proposal(self, index: int) -> None:
+        proposal = self._proposal_at(index)
+        self.approval_events.append({"status": "rejected", "proposal": proposal})
+        del self.proposals[index]
+        if proposal.assist_id is not None:
+            self._assist_state[proposal.assist_id] = "rejected"
+            self._clear_assist_surfaces()
+
+    def mark_assist_dirty(self, assist_id: str, attention_path: str) -> None:
+        self.proposals = [
+            replace(proposal, stale=True)
+            if proposal.assist_id == assist_id and not proposal.stale
+            else proposal
+            for proposal in self.proposals
+        ]
+        self._assist_state[assist_id] = "waiting"
+        self._assist_attention[assist_id] = attention_path
+        self._assist_errors.pop(assist_id, None)
+        self._render_assist_surface(assist_id)
+
+    def create_proposal(self, assist_id: str) -> PatchProposal:
+        try:
+            assist = self.ai.get(assist_id)
+            if not self.ai.is_dirty(assist_id):
+                raise RuntimeError(f"AI assist has no pending input changes: {assist_id}")
+            if not self._assist_is_ready(assist_id):
+                raise RuntimeError(f"AI assist is not ready: {assist_id}")
+            self._assist_state[assist_id] = "generating"
+            self._render_assist_surface(assist_id)
+            proposal = self._ai_runner.run(assist)
+        except Exception as exc:
+            self._assist_state[assist_id] = "error"
+            self._assist_errors[assist_id] = exc
+            logger.exception("AI assist proposal failed: %s", assist_id)
+            self._render_assist_surface(assist_id)
+            raise
+        self.proposals = [existing for existing in self.proposals if existing.assist_id != assist.id]
+        self.proposals.append(proposal)
+        self.ai.clear_dirty(assist_id)
+        self._assist_errors.pop(assist_id, None)
+        self._assist_state[assist_id] = "proposal"
+        self._render_assist_surface(assist_id)
+        return proposal
 
     def _repr_mimebundle_(self, **kwargs):
         return self.widget()._repr_mimebundle_(**kwargs)
@@ -221,7 +291,12 @@ class AIForm:
         self._widgets[path] = widget
         if hasattr(widget, "observe"):
             widget.observe(lambda change, p=path: self._on_widget_change(p, change), names="value")
-        return widget
+        surface = widgets.VBox([], layout=widgets.Layout(height="0px", overflow="visible"))
+        surface.add_class("aipy-assist-surface")
+        self._assist_surfaces[path] = surface
+        shell = widgets.VBox([widget, surface], layout=widgets.Layout(overflow="visible"))
+        shell.add_class("aipy-field-shell")
+        return shell
 
     def _array_widget(self, field: Array, path: str):
         import ipywidgets as widgets
@@ -287,6 +362,7 @@ class AIForm:
     def _on_widget_change(self, path: str, change: dict[str, Any]) -> None:
         if change["name"] != "value":
             raise ValueError(f"Unexpected widget change event for {path}: {change!r}")
+        self._attention_path = path
         self.set_value(path, change["new"])
 
     def _sync_widget_value(self, widget: Any, path: str) -> None:
@@ -305,6 +381,7 @@ class AIForm:
                     func(ctx)
             finally:
                 self._active_hook_paths.pop()
+        self.ai.mark_changed(path)
 
     def _run_action(self, action: Action) -> None:
         handler = self._action_handlers.get(action.id)
@@ -323,3 +400,184 @@ class AIForm:
         if label is None:
             raise ValueError(f"Step is missing 'id' or 'label': {step!r}")
         return label
+
+    def _render_assist_surface(self, assist_id: str) -> None:
+        attention_path = self._assist_attention.get(assist_id)
+        if attention_path is None:
+            return
+        surface = self._assist_surfaces.get(attention_path)
+        if surface is None:
+            return
+
+        import ipywidgets as widgets
+
+        self._clear_assist_surfaces()
+        state = self._assist_state.get(assist_id)
+        if state == "waiting":
+            surface.children = (self._assist_bubble([widgets.HTML(self._assist_status_html("AI will suggest after input settles..."))]),)
+            return
+        if state == "generating":
+            surface.children = (self._assist_bubble([widgets.HTML(self._assist_status_html("Generating suggestion..."))]),)
+            return
+        if state == "error":
+            error = self._assist_errors.get(assist_id)
+            message = "AI suggestion failed."
+            if error is not None:
+                message = f"AI suggestion failed: {type(error).__name__}: {error}"
+            surface.children = (self._assist_bubble([widgets.HTML(self._assist_status_html(message, kind="error"))]),)
+            return
+        proposal_index = self._proposal_index_for_assist(assist_id)
+        if proposal_index is None:
+            return
+        proposal = self.proposals[proposal_index]
+        stale = " <em>(stale)</em>" if proposal.stale else ""
+        operations = "<br>".join(
+            f"<code>{escape(operation.path)}</code> = {escape(repr(operation.value))}"
+            for operation in proposal.operations
+        )
+        accept_button = widgets.Button(description="Accept", button_style="success")
+        reject_button = widgets.Button(description="Reject", button_style="warning")
+        accept_button.disabled = proposal.stale
+        accept_button.on_click(lambda _button, i=proposal_index: self.accept_proposal(i))
+        reject_button.on_click(lambda _button, i=proposal_index: self.reject_proposal(i))
+        surface.children = (
+            self._assist_bubble(
+                [
+                    widgets.HTML(
+                        f"{self._assist_css()}<div class='aipy-assist-bubble'>"
+                        f"<strong>AI proposal{stale}</strong>"
+                        f"<p>{escape(proposal.message)}</p>"
+                        f"<div class='aipy-assist-operations'>{operations}</div>"
+                        f"<div class='aipy-assist-actions'></div></div>"
+                    ),
+                    widgets.HBox([accept_button, reject_button]),
+                ],
+                proposal=True,
+            ),
+        )
+
+    def _clear_assist_surfaces(self) -> None:
+        for surface in self._assist_surfaces.values():
+            surface.children = ()
+
+    def _assist_bubble(self, children: list[Any], *, proposal: bool = False):
+        import ipywidgets as widgets
+
+        bubble = widgets.VBox(children, layout=widgets.Layout(width="320px", overflow="visible"))
+        bubble.add_class("aipy-assist-bubble-wrap")
+        if proposal:
+            bubble.add_class("aipy-assist-proposal-wrap")
+        return bubble
+
+    def _assist_status_html(self, message: str, *, kind: str = "info") -> str:
+        class_name = "aipy-assist-bubble aipy-assist-error" if kind == "error" else "aipy-assist-bubble"
+        return f"{self._assist_css()}<div class='{class_name}'><em>{escape(message)}</em></div>"
+
+    def _assist_css(self) -> str:
+        return """
+<style>
+.aipy-field-shell {
+  position: relative;
+  overflow: visible !important;
+  width: max-content;
+  max-width: 100%;
+  z-index: 2147483647;
+}
+.aipy-assist-surface {
+  position: relative;
+  height: 0 !important;
+  overflow: visible !important;
+  z-index: 2147483647;
+}
+.aipy-assist-bubble-wrap {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: -40px;
+  z-index: 2147483647;
+}
+.aipy-assist-proposal-wrap {
+  top: -130px;
+}
+.aipy-assist-bubble-wrap .widget-hbox {
+  z-index: 2147483647;
+}
+.aipy-assist-bubble {
+  position: relative;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+  color: #111827;
+  padding: 10px 12px 46px;
+}
+.aipy-assist-bubble p {
+  margin: 8px 0;
+}
+.aipy-assist-error {
+  border-color: #dc2626;
+  color: #991b1b;
+}
+.aipy-assist-error::before {
+  border-left-color: #dc2626;
+  border-bottom-color: #dc2626;
+}
+.aipy-assist-operations {
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 0;
+}
+.aipy-assist-bubble-wrap .widget-hbox {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+}
+.aipy-assist-bubble-wrap .widget-button {
+  height: 26px;
+}
+.aipy-assist-bubble::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 16px;
+  width: 14px;
+  height: 14px;
+  background: #ffffff;
+  border-left: 1px solid #d1d5db;
+  border-bottom: 1px solid #d1d5db;
+  transform: rotate(45deg);
+  box-shadow: -4px 4px 8px rgba(15, 23, 42, 0.06);
+}
+.aipy-assist-proposal-wrap .aipy-assist-bubble::before {
+  top: 106px;
+}
+@media (max-width: 900px) {
+  .aipy-assist-bubble-wrap {
+    left: 0;
+    top: 8px;
+  }
+  .aipy-assist-bubble::before {
+    display: none;
+  }
+}
+</style>
+"""
+
+    def _proposal_at(self, index: int) -> PatchProposal:
+        if index < 0 or index >= len(self.proposals):
+            raise IndexError(f"Proposal index out of range: {index}")
+        return self.proposals[index]
+
+    def _proposal_index_for_assist(self, assist_id: str) -> int | None:
+        for index, proposal in enumerate(self.proposals):
+            if proposal.assist_id == assist_id:
+                return index
+        return None
+
+    def _assist_is_ready(self, assist_id: str) -> bool:
+        assist = self.ai.get(assist_id)
+        for path in assist.watch:
+            value = self.get_value(path)
+            if isinstance(value, str) and len(value.strip()) < assist.trigger.min_chars:
+                return False
+        return True
