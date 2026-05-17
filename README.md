@@ -1,6 +1,8 @@
-# aipywidgets
+# [AI]pywidgets
 
-`aipywidgets` is an AI-assisted form toolkit for Jupyter Notebook and JupyterLab,
+[![Launch on Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/yacchin1205/aipywidgets/HEAD?labpath=examples%2Fbasic_form.ipynb)
+
+`[AI]pywidgets` is an AI-assisted form toolkit for Jupyter Notebook and JupyterLab,
 built on top of `ipywidgets`.
 
 It is designed for metadata entry workflows: files, papers, images, experiments,
@@ -11,17 +13,23 @@ chat-based assistance.
 
 ## Concept
 
-`aipywidgets` brings three ideas into a single form experience:
+`[AI]pywidgets` brings three ideas into a single form experience:
 
 1. Composite fields and wizard-style multi-step forms
 2. Dynamic form behavior through Python hooks and AI assists
 3. A chat assistant that can inspect form state and propose approved edits
 
 Raw `ipywidgets` gives developers low-level UI components.
-`aipywidgets` adds a thin layer for form schemas, state management, input events,
+`[AI]pywidgets` adds a thin layer for form schemas, state management, input events,
 AI integration, chat tools, and approval flows.
 
 ## Getting Started
+
+Install directly from Git:
+
+```bash
+pip install "aipywidgets @ git+https://github.com/yacchin1205/aipywidgets.git@v2026.05.1"
+```
 
 During early development, install from a local checkout:
 
@@ -65,14 +73,6 @@ Read and update values from Python:
 form.get_values()
 form.set_value("title", "Example paper")
 ```
-
-## Use Cases
-
-- Paper metadata entry, such as DOI, title, authors, publication year, and abstract
-- File metadata entry for images, audio, video, PDFs, and other local assets
-- Structured annotation for lab notes, experiments, and observations
-- Dataset registration forms
-- Semi-automated, reviewable data entry workflows inside notebooks
 
 ## Forms and Wizards
 
@@ -264,7 +264,7 @@ The resulting form values should be plain Python data structures:
 
 ## Field Paths
 
-Nested values need a lightweight way to address individual fields. `aipywidgets`
+Nested values need a lightweight way to address individual fields. `[AI]pywidgets`
 uses field paths rather than XPath or a full query language.
 
 Absolute paths start at the form root:
@@ -340,11 +340,9 @@ def fill_from_doi(ctx):
 Hooks receive a context object with the current form values, the changed field,
 the form instance, logging helpers, and APIs for updating values.
 
-Hook updates are part of the normal form event graph. `aipywidgets` should not
-provide an escape hatch such as disabling hooks for a specific write. Instead,
-the hook runner should detect cyclic updates and raise an error.
+Circular hook updates are treated as errors.
 
-For example, this should be treated as a hook cycle:
+For example:
 
 ```python
 @form.on_change("title")
@@ -356,14 +354,10 @@ def update_title(ctx):
     ctx.set_value("title", title_from_slug(ctx.value))
 ```
 
-The error should include the field path chain that caused the cycle, so the
-developer can decide which hook owns the derived value.
-
 ## AI Assists
 
-AI behavior is not a Python `on_change` hook. Python hooks are immediate and
-deterministic; AI assists are delayed proposal generators tied to stable form
-state.
+AI assists generate prompt-based suggestions from current form state.
+They are suited to tasks such as completion, normalization, and review.
 
 ```python
 from aipywidgets import WhenIdle
@@ -390,25 +384,9 @@ AI assists are designed for OpenAI-compatible clients. AI-generated changes
 should be reviewable by default: the UI presents proposed changes and applies
 them only after user approval.
 
-The current prototype creates one pending proposal per assist. If watched input
-changes after a proposal is created, the proposal becomes stale and cannot be
-accepted. A later stable input state replaces the stale proposal.
-
-In the widget UI, assist status and proposals are shown as a floating bubble
-near the field that currently has the user's attention. The bubble is not part
-of the form layout, so enabling an assist should not make the field list appear
-to gain extra form items.
-
-Notebook output areas can clip floating UI. Reserve form-level bottom space
-when needed:
-
-```python
-form = AIForm(..., style={"margin_bottom": "360px"})
-```
-
 ## Credentials
 
-`aipywidgets` does not collect, render, store, or persist API keys. Pass an
+`[AI]pywidgets` does not collect, render, store, or persist API keys. Pass an
 already configured OpenAI-compatible client instead:
 
 ```python
@@ -427,25 +405,9 @@ notebooks.
 
 ## Chat Assistant
 
-The AI assist bubble can also work as a compact chat surface for field
-completion. Rather than opening a separate chat window, the conversation stays
-near the field that currently has the user's attention.
-
-The first proposal is based on watched inputs and the assist prompt. After that,
-completion can continue conversationally when the user wants to adjust, clarify,
-or regenerate a proposal.
-
-Form update proposals are created through a `propose_form_update` tool. The tool
-returns a proposal only; it does not change form values. The UI shows the
-proposal with Accept and Reject controls. Accept applies the proposal to the
-form, while Reject is sent back into the conversation.
-
-The user can add instructions in the same bubble. The assistant can then use the
-conversation history, current form values, and approval results to propose
-again.
-
-Custom tools can read external metadata, validate values, or prepare candidate
-patches, but AI-generated form edits remain reviewable.
+The chat assistant supports conversational field completion and revision.
+Suggested form updates remain reviewable: users can accept or reject them
+before any values are applied.
 
 ## Design Principles
 
@@ -457,50 +419,3 @@ patches, but AI-generated form edits remain reviewable.
 - Detect cyclic hook updates and report them as errors
 - Require user approval for AI-initiated form edits by default
 - Allow OpenAI-compatible API clients to be swapped
-
-## Initial Scope
-
-The MVP should include:
-
-- Basic field definitions
-- Array and object fields for nested metadata
-- Field paths for nested reads, writes, hooks, and selections
-- Step-based forms
-- Wizard-style step display
-- User actions for save, submit, deposit, or other explicit operations
-- Reading and setting form values
-- Python hooks
-- Hook cycle detection
-- Minimal AI assists
-- Chat UI display
-- A chat tool for reading current form values
-- A chat tool for proposing updates
-- User-reviewed proposals and approval-driven form updates
-
-## Non-Goals
-
-The initial version does not aim to provide:
-
-- A general-purpose low-code form builder
-- Complex permission management
-- Server-side persistence
-- A large workflow engine
-- A standalone web application outside notebooks
-
-## Development Notes
-
-The internal design is expected to separate the following responsibilities:
-
-- `Field`: primitive and structured field definitions, including validation
-- `ArrayField`: repeated field values backed by a child field schema
-- `ObjectField`: dictionary-like grouped values backed by named child fields
-- `FieldPath`: lightweight absolute and relative paths for nested values
-- `FormState`: current values, initial values, and change history
-- `AIForm`: the main API for display, events, and hook registration
-- `HookContext`: context passed to hook functions
-- `HookRunner`: hook execution, dependency tracking, and cycle detection
-- `Action`: user-triggered operations with labels and Python handlers
-- `AIAssist`: watched inputs, stable-state triggers, prompts, and output fields
-- `ChatPanel`: chat UI
-- `ToolRegistry`: tools callable from chat
-- `Approval`: review, accept, reject, and apply flow for AI-generated proposals
