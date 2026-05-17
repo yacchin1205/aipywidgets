@@ -356,17 +356,9 @@ form.ai.assist(
 )
 ```
 
-AI assists are designed for OpenAI-compatible clients. The first implementation
-will focus on:
-
-- Completing one field from existing form values
-- Normalizing user input
-- Generating candidate values
-- Detecting missing or inconsistent fields
-- Producing review summaries
-
-AI-generated changes should be reviewable by default. The intended behavior is
-to present proposed changes and apply them only after user approval.
+AI assists are designed for OpenAI-compatible clients. AI-generated changes
+should be reviewable by default: the UI presents proposed changes and applies
+them only after user approval.
 
 The current prototype creates one pending proposal per assist. If watched input
 changes after a proposal is created, the proposal becomes stale and cannot be
@@ -376,6 +368,13 @@ In the widget UI, assist status and proposals are shown as a floating bubble
 near the field that currently has the user's attention. The bubble is not part
 of the form layout, so enabling an assist should not make the field list appear
 to gain extra form items.
+
+Notebook output areas can clip floating UI. Reserve form-level bottom space
+when needed:
+
+```python
+form = AIForm(..., style={"margin_bottom": "360px"})
+```
 
 ## Credentials
 
@@ -398,54 +397,25 @@ notebooks.
 
 ## Chat Assistant
 
-A form can display a chat window in the lower-left or lower-right corner.
+The AI assist bubble can also work as a compact chat surface for field
+completion. Rather than opening a separate chat window, the conversation stays
+near the field that currently has the user's attention.
 
-```python
-form.enable_chat(
-    position="right",
-    instructions="""
-    You help the user complete metadata fields.
-    Ask before applying changes to the form.
-    """,
-)
-```
+The first proposal is based on watched inputs and the assist prompt. After that,
+completion can continue conversationally when the user wants to adjust, clarify,
+or regenerate a proposal.
 
-The chat assistant is intended to use the OpenAI Responses API. It can interact
-with the form through tool calls.
+Form update proposals are created through a `propose_form_update` tool. The tool
+returns a proposal only; it does not change form values. The UI shows the
+proposal with Accept and Reject controls. Accept applies the proposal to the
+form, while Reject is sent back into the conversation.
 
-Examples of built-in tools:
+The user can add instructions in the same bubble. The assistant can then use the
+conversation history, current form values, and approval results to propose
+again.
 
-- `get_form_values`: return the current form values
-- `get_field_schema`: return the field definitions
-- `propose_form_update`: create a proposed update to the form
-
-Developers can provide custom tools when enabling chat.
-
-```python
-form.enable_chat(
-    tools=[
-        lookup_crossref_tool,
-        search_local_files_tool,
-        validate_metadata_tool,
-    ],
-)
-```
-
-The assistant should not directly apply form updates through a tool call.
-Instead, it proposes a patch, the UI presents the patch for review, and the
-approval layer applies it only after the user accepts it.
-
-Approval results are part of the conversation. When the user accepts, rejects,
-or partially accepts a proposal, that result should be sent back to the
-assistant so it can continue from the actual state of the workflow. This matters
-because form completion is often iterative: the first proposal may be incomplete,
-partially wrong, or blocked by validation errors.
-
-Custom tools should be explicit about their behavior:
-
-- read-only tools can inspect external or form-related data
-- proposal tools can return candidate patches
-- side-effecting tools should require approval before their effects are used
+Custom tools can read external metadata, validate values, or prepare candidate
+patches, but AI-generated form edits remain reviewable.
 
 ## Design Principles
 

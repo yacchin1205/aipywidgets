@@ -31,6 +31,7 @@ class PatchProposal:
     assist_id: str | None = None
     input_paths: tuple[str, ...] = ()
     input_snapshot: dict[str, Any] | None = None
+    tool_call_id: str | None = None
     stale: bool = False
 
 
@@ -149,11 +150,15 @@ class AIAssistManager:
             self._timers.pop(assist_id, None)
 
 
-class AIProposalRunner:
+class AIConversationRunner:
     def __init__(self, form: Any) -> None:
         self._form = form
 
     def run(self, assist: AIAssist) -> PatchProposal:
+        prompt = self._initial_user_prompt(assist)
+        return self.run_with_message(assist, prompt)
+
+    def run_with_message(self, assist: AIAssist, message: str) -> PatchProposal:
         config = self._form.ai_config
         if config is None:
             raise RuntimeError("AI assist requires AIConfig")
@@ -162,34 +167,56 @@ class AIProposalRunner:
             raise RuntimeError("AI assist requires AIConfig.model")
 
         input_snapshot = {path: self._form.get_value(path) for path in assist.watch}
-        prompt = self._render_prompt(assist.prompt)
+        user_item = {"role": "user", "content": message}
+        input_items = [*self._form._ai_conversation_items, user_item]
         response = client.responses.create(
             model=config.model,
-            input=[
-                {
-                    "role": "system",
-                    "content": self._system_prompt(assist),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "aipywidgets_patch_proposal",
-                    "schema": self._proposal_schema(assist),
-                }
-            },
+            instructions=self._instructions(assist),
+            input=input_items,
+            tools=[self._proposal_tool(assist)],
+            tool_choice={"type": "function", "name": "propose_form_update"},
         )
-        proposal = parse_patch_proposal(extract_response_text(response))
+        output_items = response_output_items(response)
+        proposal = self._proposal_from_tool_call(assist, output_items)
+        self._form._ai_conversation_items.extend([user_item, *output_items])
+        self._form._ai_conversation_items.append(
+            {
+                "type": "function_call_output",
+                "call_id": proposal.tool_call_id,
+                "output": json.dumps(
+                    {
+                        "status": "proposal_created",
+                        "message": proposal.message,
+                        "operations_count": len(proposal.operations),
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        )
+        self._form._record_ai_event("assistant", proposal.message or "Created a proposal.")
         return PatchProposal(
             assist_id=assist.id,
             input_paths=assist.watch,
             input_snapshot=input_snapshot,
             message=proposal.message,
             operations=proposal.operations,
+            tool_call_id=proposal.tool_call_id,
+        )
+
+    def _initial_user_prompt(self, assist: AIAssist) -> str:
+        watched_values = {path: self._form.get_value(path) for path in assist.watch}
+        outputs = json.dumps(assist.outputs, ensure_ascii=False, indent=2)
+        values = json.dumps(watched_values, ensure_ascii=False, indent=2)
+        return (
+            "Create a reviewable form update proposal for this assist.\n\n"
+            f"Assist id: {assist.id}\n"
+            f"Assist label: {assist.label}\n\n"
+            "Assist prompt:\n"
+            f"{self._render_prompt(assist.prompt)}\n\n"
+            "Watched input values:\n"
+            f"{values}\n\n"
+            "Allowed output paths:\n"
+            f"{outputs}"
         )
 
     def _render_prompt(self, prompt: str) -> str:
@@ -203,14 +230,25 @@ class AIProposalRunner:
 
         return re.sub(r"\{\{\s*values\.([A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\}\}", replace_value, rendered)
 
-    def _system_prompt(self, assist: AIAssist) -> str:
+    def _instructions(self, assist: AIAssist) -> str:
         outputs = json.dumps(assist.outputs, ensure_ascii=False, indent=2)
         return (
-            "You propose form updates for aipywidgets. "
-            "Return only a JSON object matching the supplied schema. "
+            "You help complete an aipywidgets form. "
+            "Use the propose_form_update tool when proposing form edits. "
             "Do not claim that changes have been applied. "
-            f"Allowed output paths and their meanings: {outputs}"
+            "The tool creates a reviewable proposal only; the UI applies accepted proposals. "
+            "Respect the allowed output paths and their meanings:\n"
+            f"{outputs}"
         )
+
+    def _proposal_tool(self, assist: AIAssist) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "name": "propose_form_update",
+            "description": "Create a reviewable proposal for updating form values. Does not apply changes.",
+            "parameters": self._proposal_schema(assist),
+            "strict": True,
+        }
 
     def _proposal_schema(self, assist: AIAssist) -> dict[str, Any]:
         output_paths = list(assist.outputs)
@@ -268,6 +306,33 @@ class AIProposalRunner:
             "required": ["message", "operations"],
         }
 
+    def _proposal_from_tool_call(self, assist: AIAssist, output_items: list[dict[str, Any]]) -> PatchProposal:
+        for item in output_items:
+            if item.get("type") != "function_call":
+                continue
+            if item.get("name") != "propose_form_update":
+                raise RuntimeError(f"Unexpected AI tool call: {item.get('name')}")
+            arguments = item.get("arguments")
+            if isinstance(arguments, str):
+                data = json.loads(arguments)
+            elif isinstance(arguments, dict):
+                data = arguments
+            else:
+                raise TypeError("propose_form_update arguments must be a JSON object")
+            proposal = parse_patch_proposal_data(data)
+            for operation in proposal.operations:
+                if operation.path not in assist.outputs:
+                    raise ValueError(f"AI proposed a path that is not allowed: {operation.path}")
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError("propose_form_update call_id is required")
+            return PatchProposal(
+                message=proposal.message,
+                operations=proposal.operations,
+                tool_call_id=call_id,
+            )
+        raise RuntimeError("AI response did not call propose_form_update")
+
 
 def extract_response_text(response: Any) -> str:
     output_text = getattr(response, "output_text", None)
@@ -282,8 +347,37 @@ def extract_response_text(response: Any) -> str:
     raise TypeError("Responses API result does not expose output_text")
 
 
+def response_output_items(response: Any) -> list[dict[str, Any]]:
+    output = getattr(response, "output", None)
+    if output is None and isinstance(response, dict):
+        output = response.get("output")
+    if not isinstance(output, list):
+        raise TypeError("Responses API result does not expose output items")
+    return [_response_item_to_dict(item) for item in output]
+
+
+def _response_item_to_dict(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    if hasattr(item, "model_dump"):
+        dumped = item.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    data = {
+        key: getattr(item, key)
+        for key in ("type", "name", "arguments", "call_id", "id", "status")
+        if hasattr(item, key)
+    }
+    if not data:
+        raise TypeError(f"Unsupported Responses API output item: {item!r}")
+    return data
+
+
 def parse_patch_proposal(text: str) -> PatchProposal:
-    data = json.loads(text)
+    return parse_patch_proposal_data(json.loads(text))
+
+
+def parse_patch_proposal_data(data: Any) -> PatchProposal:
     if not isinstance(data, dict):
         raise TypeError("Patch proposal must be a JSON object")
     operations = data.get("operations")

@@ -21,7 +21,17 @@ class FakeResponses:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(output_text=self.output_text)
+        return SimpleNamespace(
+            output=[
+                {
+                    "type": "function_call",
+                    "name": "propose_form_update",
+                    "call_id": f"call_{len(self.calls)}",
+                    "arguments": self.output_text,
+                }
+            ],
+            output_text=self.output_text,
+        )
 
 
 class FakeClient:
@@ -92,6 +102,8 @@ class AITests(unittest.TestCase):
         self.assertEqual(len(form.proposals), 1)
         self.assertEqual(form.proposals[0].operations[0].value, ["ai", "metadata"])
         self.assertEqual(client.responses.calls[0]["model"], "test-model")
+        self.assertEqual(client.responses.calls[0]["tool_choice"]["name"], "propose_form_update")
+        self.assertEqual(client.responses.calls[0]["tools"][0]["name"], "propose_form_update")
 
     def test_ai_assist_schema_does_not_use_untyped_array_items(self) -> None:
         client = FakeClient('{"message": "", "operations": []}')
@@ -111,10 +123,63 @@ class AITests(unittest.TestCase):
         form.set_value("abstract", "Text")
         form.create_proposal("suggest_keywords")
 
-        schema = client.responses.calls[0]["text"]["format"]["schema"]
+        schema = client.responses.calls[0]["tools"][0]["parameters"]
         value_schema = schema["properties"]["operations"]["items"]["properties"]["value"]
         array_schema = value_schema["anyOf"][4]
         self.assertIn("type", array_schema["items"]["anyOf"][0])
+
+    def test_rejected_proposal_feedback_is_used_by_next_message(self) -> None:
+        client = FakeClient(
+            json.dumps(
+                {
+                    "message": "Use generated keywords.",
+                    "operations": [{"op": "set", "path": "keywords", "value": ["ai"]}],
+                }
+            )
+        )
+        form = AIForm(
+            ai=AIConfig(client=client, model="test-model"),
+            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
+        )
+        form.ai.assist(
+            id="suggest_keywords",
+            label="Suggest keywords",
+            watch=["abstract"],
+            trigger=WhenIdle(ms=100000),
+            prompt="Suggest",
+            outputs={"keywords": "Keywords"},
+        )
+        form.set_value("abstract", "Text")
+        form.create_proposal("suggest_keywords")
+        form.reject_proposal(0)
+
+        form.submit_assist_message("suggest_keywords", "Use domain-specific terms.")
+
+        second_input = client.responses.calls[1]["input"]
+        self.assertIn("rejected", json.dumps(second_input))
+        self.assertIn("Use domain-specific terms.", json.dumps(second_input))
+        self.assertEqual(len(form.proposals), 1)
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_chat_history_keeps_all_events_in_scroll_area(self) -> None:
+        form = AIForm(
+            ai=AIConfig(client=FakeClient('{"message": "", "operations": []}'), model="test-model"),
+            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
+        )
+        for index in range(8):
+            form._record_ai_event("user" if index % 2 else "assistant", f"event {index}")
+
+        html = form._assist_history_html()
+
+        self.assertIn("aipy-assist-history", html)
+        self.assertIn("event 0", html)
+        self.assertIn("event 7", html)
+        self.assertIn("aipy-assist-event-row-user", html)
+        self.assertIn("aipy-assist-event-row-assistant", html)
+        self.assertLess(html.index("event 7"), html.index("event 0"))
+
+        css = form._assist_css()
+        self.assertIn("flex-direction: column-reverse", css)
 
     def test_accept_proposal_applies_patch_and_records_feedback(self) -> None:
         client = FakeClient(
@@ -216,7 +281,7 @@ class AITests(unittest.TestCase):
         self.assertEqual(form.approval_events[0]["status"], "rejected")
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
-    def test_reject_proposal_closes_assist_bubble(self) -> None:
+    def test_reject_proposal_opens_chat_input(self) -> None:
         client = FakeClient(
             json.dumps(
                 {
@@ -245,7 +310,65 @@ class AITests(unittest.TestCase):
 
         form.reject_proposal(0)
 
-        self.assertEqual(form._assist_surfaces["abstract"].children, ())
+        bubble = form._assist_surfaces["abstract"].children[0]
+        self.assertIn("Add instructions", bubble.children[0].value)
+        self.assertFalse(bubble.children[-1].children[0].disabled)
+        self.assertEqual(form._assist_state["suggest_keywords"], "chat")
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_enter_in_chat_input_sends_message(self) -> None:
+        client = FakeClient(
+            json.dumps(
+                {
+                    "message": "Use generated keywords.",
+                    "operations": [
+                        {"op": "set", "path": "keywords", "value": ["ai", "metadata"]}
+                    ],
+                }
+            )
+        )
+        form = AIForm(
+            ai=AIConfig(client=client, model="test-model"),
+            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
+        )
+        form.ai.assist(
+            id="suggest_keywords",
+            label="Suggest keywords",
+            watch=["abstract"],
+            trigger=WhenIdle(ms=100000),
+            prompt="Suggest",
+            outputs={"keywords": "Keywords"},
+        )
+        form.widget()
+        form.set_value("abstract", "Text")
+        form.create_proposal("suggest_keywords")
+        form.reject_proposal(0)
+        input_widget = form._assist_chat_inputs["suggest_keywords"]
+        input_widget.value = "Use Japanese metadata terms."
+
+        input_widget._submission_callbacks(input_widget)
+
+        self.assertEqual(input_widget.value, "")
+        self.assertEqual(len(client.responses.calls), 2)
+        self.assertIn("Use Japanese metadata terms.", json.dumps(client.responses.calls[1]["input"]))
+        self.assertEqual(form._assist_state["suggest_keywords"], "proposal")
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_clear_assist_surfaces_can_keep_active_surface(self) -> None:
+        import ipywidgets as widgets
+
+        form = AIForm(fields=[fields.Textarea("abstract"), fields.Tags("keywords")])
+        form.widget()
+        abstract_surface = form._assist_surfaces["abstract"]
+        keywords_surface = form._assist_surfaces["keywords"]
+        active_child = widgets.HTML("active")
+        abstract_surface.children = (active_child,)
+        keywords_surface.children = (widgets.HTML("inactive"),)
+
+        form._clear_assist_surfaces(except_path="abstract")
+
+        self.assertEqual(abstract_surface.children, (active_child,))
+        self.assertEqual(keywords_surface.children, ())
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_accept_proposal_closes_assist_bubble(self) -> None:
@@ -391,6 +514,8 @@ class AITests(unittest.TestCase):
         self.assertIn("aipy-assist-bubble-wrap", bubble._dom_classes)
         self.assertIn("AI will suggest", bubble.children[0].value)
         self.assertIn("aipy-assist-bubble", bubble.children[0].value)
+        self.assertNotIn("aipy-assist-proposal-wrap {\n  top:", bubble.children[0].value)
+        self.assertNotIn("aipy-assist-proposal-wrap::before", bubble.children[0].value)
         self.assertEqual(form._assist_surfaces["keywords"].children, ())
 
     def test_ai_config_requires_explicit_client(self) -> None:

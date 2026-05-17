@@ -143,6 +143,24 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot define both fields and steps"):
             AIForm(fields=[fields.Text("title")], steps=[{"id": "metadata", "fields": []}])
 
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_margin_bottom_style_adds_bottom_spacer(self) -> None:
+        form = AIForm(fields=[fields.Text("title")], style={"margin_bottom": "360px"})
+
+        root = form.widget()
+        spacer = root.children[-1]
+
+        self.assertIn("aipy-form-margin-bottom", spacer._dom_classes)
+        self.assertEqual(spacer.layout.height, "360px")
+
+    def test_unknown_style_key_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported AIForm style key"):
+            AIForm(fields=[fields.Text("title")], style={"assist_margin": "360px"})
+
+    def test_invalid_style_value_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty string"):
+            AIForm(fields=[fields.Text("title")], style={"margin_bottom": ""})
+
     def test_unknown_action_handler_fails_fast(self) -> None:
         form = AIForm(actions=[Action(id="save", label="Save")])
 

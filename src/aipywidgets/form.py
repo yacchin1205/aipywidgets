@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -7,7 +8,7 @@ from html import escape
 from typing import Any
 
 from .actions import Action
-from .ai import AIAssistManager, AIProposalRunner, PatchProposal
+from .ai import AIAssistManager, AIConversationRunner, PatchProposal
 from .field_path import get_in, parse_field_path, set_in
 from .fields import Array, Field, Object
 
@@ -76,12 +77,14 @@ class AIForm:
         steps: list[dict[str, Any]] | None = None,
         actions: list[Action] | None = None,
         ai: Any | None = None,
+        style: dict[str, str] | None = None,
     ) -> None:
         self.title = title
         self.fields = fields or []
         self.steps = steps or []
         self.actions = actions or []
         self.ai_config = ai
+        self.style = self._normalize_style(style)
         self.ai = AIAssistManager(self)
         self._validate_schema()
         self._values = self._initial_values()
@@ -89,7 +92,9 @@ class AIForm:
         self._hooks: dict[str, list[Callable[[HookContext], None]]] = {}
         self._action_handlers: dict[str, Callable[[ActionContext], None]] = {}
         self._active_hook_paths: list[str] = []
-        self._ai_runner = AIProposalRunner(self)
+        self._ai_runner = AIConversationRunner(self)
+        self._ai_conversation_items: list[dict[str, Any]] = []
+        self._ai_chat_events: list[dict[str, str]] = []
         self.proposals: list[PatchProposal] = []
         self.approval_events: list[dict[str, Any]] = []
         self._attention_path: str | None = None
@@ -97,6 +102,7 @@ class AIForm:
         self._assist_attention: dict[str, str] = {}
         self._assist_errors: dict[str, BaseException] = {}
         self._assist_surfaces: dict[str, Any] = {}
+        self._assist_chat_inputs: dict[str, Any] = {}
         self._message_widget = None
 
     def get_values(self) -> dict[str, Any]:
@@ -148,6 +154,7 @@ class AIForm:
         for operation in proposal.operations:
             self.set_value(operation.path, operation.value)
         self.approval_events.append({"status": "accepted", "proposal": proposal})
+        self._record_approval_result("accepted", proposal)
         del self.proposals[index]
         if proposal.assist_id is not None:
             self._assist_state[proposal.assist_id] = "accepted"
@@ -156,10 +163,12 @@ class AIForm:
     def reject_proposal(self, index: int) -> None:
         proposal = self._proposal_at(index)
         self.approval_events.append({"status": "rejected", "proposal": proposal})
+        self._record_approval_result("rejected", proposal)
         del self.proposals[index]
         if proposal.assist_id is not None:
-            self._assist_state[proposal.assist_id] = "rejected"
-            self._clear_assist_surfaces()
+            self._assist_state[proposal.assist_id] = "chat"
+            self._render_assist_surface(proposal.assist_id)
+            self._focus_assist_input(proposal.assist_id)
 
     def mark_assist_dirty(self, assist_id: str, attention_path: str) -> None:
         self.proposals = [
@@ -197,6 +206,28 @@ class AIForm:
         self._render_assist_surface(assist_id)
         return proposal
 
+    def submit_assist_message(self, assist_id: str, message: str) -> PatchProposal:
+        if not message.strip():
+            raise ValueError("AI assist message is required")
+        try:
+            assist = self.ai.get(assist_id)
+            self._record_ai_event("user", message.strip())
+            self._assist_state[assist_id] = "generating"
+            self._render_assist_surface(assist_id)
+            proposal = self._ai_runner.run_with_message(assist, message.strip())
+        except Exception as exc:
+            self._assist_state[assist_id] = "error"
+            self._assist_errors[assist_id] = exc
+            logger.exception("AI assist chat failed: %s", assist_id)
+            self._render_assist_surface(assist_id)
+            raise
+        self.proposals = [existing for existing in self.proposals if existing.assist_id != assist.id]
+        self.proposals.append(proposal)
+        self._assist_errors.pop(assist_id, None)
+        self._assist_state[assist_id] = "proposal"
+        self._render_assist_surface(assist_id)
+        return proposal
+
     def _repr_mimebundle_(self, **kwargs):
         return self.widget()._repr_mimebundle_(**kwargs)
 
@@ -214,6 +245,11 @@ class AIForm:
             children.append(self._actions_widget())
         self._message_widget = widgets.HTML("")
         children.append(self._message_widget)
+        margin_bottom = self.style.get("margin_bottom")
+        if margin_bottom is not None:
+            spacer = widgets.Box(layout=widgets.Layout(height=margin_bottom))
+            spacer.add_class("aipy-form-margin-bottom")
+            children.append(spacer)
         return widgets.VBox(children)
 
     def _initial_values(self) -> dict[str, Any]:
@@ -267,6 +303,21 @@ class AIForm:
                     raise ValueError(f"Array field requires an item schema: {field.id}")
                 if isinstance(field.item, Object):
                     self._validate_fields(field.item.fields, owner=f"array {field.id!r} item")
+
+    def _normalize_style(self, style: dict[str, str] | None) -> dict[str, str]:
+        if style is None:
+            return {}
+        if not isinstance(style, dict):
+            raise TypeError("AIForm style must be a dictionary")
+        supported = {"margin_bottom"}
+        normalized: dict[str, str] = {}
+        for key, value in style.items():
+            if key not in supported:
+                raise ValueError(f"Unsupported AIForm style key: {key}")
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"AIForm style value must be a non-empty string: {key}")
+            normalized[key] = value
+        return normalized
 
     def _field_widgets(self, fields: list[Field], prefix: str = "") -> list[Any]:
         widgets = []
@@ -401,6 +452,32 @@ class AIForm:
             raise ValueError(f"Step is missing 'id' or 'label': {step!r}")
         return label
 
+    def _record_ai_event(self, role: str, content: str) -> None:
+        self._ai_chat_events.append({"role": role, "content": content})
+
+    def _record_approval_result(self, status: str, proposal: PatchProposal) -> None:
+        operations = [
+            {"op": operation.op, "path": operation.path, "value": operation.value}
+            for operation in proposal.operations
+        ]
+        content = json.dumps(
+            {
+                "approval": status,
+                "proposal": {
+                    "message": proposal.message,
+                    "operations": operations,
+                },
+            },
+            ensure_ascii=False,
+        )
+        self._ai_conversation_items.append({"role": "user", "content": content})
+        self._record_ai_event("user", f"{status.capitalize()} proposal.")
+
+    def _focus_assist_input(self, assist_id: str) -> None:
+        input_widget = self._assist_chat_inputs.get(assist_id)
+        if input_widget is not None and hasattr(input_widget, "focus"):
+            input_widget.focus()
+
     def _render_assist_surface(self, assist_id: str) -> None:
         attention_path = self._assist_attention.get(assist_id)
         if attention_path is None:
@@ -411,20 +488,56 @@ class AIForm:
 
         import ipywidgets as widgets
 
-        self._clear_assist_surfaces()
+        self._clear_assist_surfaces(except_path=attention_path)
         state = self._assist_state.get(assist_id)
         if state == "waiting":
-            surface.children = (self._assist_bubble([widgets.HTML(self._assist_status_html("AI will suggest after input settles..."))]),)
+            surface.children = (
+                self._assist_bubble(
+                    self._assist_chat_children(
+                        assist_id,
+                        status="AI will suggest after input settles...",
+                        input_disabled=False,
+                    )
+                ),
+            )
             return
         if state == "generating":
-            surface.children = (self._assist_bubble([widgets.HTML(self._assist_status_html("Generating suggestion..."))]),)
+            surface.children = (
+                self._assist_bubble(
+                    self._assist_chat_children(
+                        assist_id,
+                        status="Generating suggestion...",
+                        input_disabled=True,
+                    )
+                ),
+            )
             return
         if state == "error":
             error = self._assist_errors.get(assist_id)
             message = "AI suggestion failed."
             if error is not None:
                 message = f"AI suggestion failed: {type(error).__name__}: {error}"
-            surface.children = (self._assist_bubble([widgets.HTML(self._assist_status_html(message, kind="error"))]),)
+            surface.children = (
+                self._assist_bubble(
+                    self._assist_chat_children(
+                        assist_id,
+                        status=message,
+                        status_kind="error",
+                        input_disabled=False,
+                    )
+                ),
+            )
+            return
+        if state == "chat":
+            surface.children = (
+                self._assist_bubble(
+                    self._assist_chat_children(
+                        assist_id,
+                        status="Add instructions to adjust the proposal.",
+                        input_disabled=False,
+                    )
+                ),
+            )
             return
         proposal_index = self._proposal_index_for_assist(assist_id)
         if proposal_index is None:
@@ -442,22 +555,24 @@ class AIForm:
         reject_button.on_click(lambda _button, i=proposal_index: self.reject_proposal(i))
         surface.children = (
             self._assist_bubble(
-                [
-                    widgets.HTML(
-                        f"{self._assist_css()}<div class='aipy-assist-bubble'>"
+                self._assist_chat_children(
+                    assist_id,
+                    proposal_html=(
                         f"<strong>AI proposal{stale}</strong>"
                         f"<p>{escape(proposal.message)}</p>"
                         f"<div class='aipy-assist-operations'>{operations}</div>"
-                        f"<div class='aipy-assist-actions'></div></div>"
                     ),
-                    widgets.HBox([accept_button, reject_button]),
-                ],
+                    actions=widgets.HBox([accept_button, reject_button]),
+                    input_disabled=True,
+                ),
                 proposal=True,
             ),
         )
 
-    def _clear_assist_surfaces(self) -> None:
-        for surface in self._assist_surfaces.values():
+    def _clear_assist_surfaces(self, *, except_path: str | None = None) -> None:
+        for path, surface in self._assist_surfaces.items():
+            if path == except_path:
+                continue
             surface.children = ()
 
     def _assist_bubble(self, children: list[Any], *, proposal: bool = False):
@@ -468,6 +583,75 @@ class AIForm:
         if proposal:
             bubble.add_class("aipy-assist-proposal-wrap")
         return bubble
+
+    def _assist_chat_children(
+        self,
+        assist_id: str,
+        *,
+        status: str | None = None,
+        status_kind: str = "info",
+        proposal_html: str | None = None,
+        actions: Any | None = None,
+        input_disabled: bool,
+    ) -> list[Any]:
+        import ipywidgets as widgets
+
+        input_widget = widgets.Text(
+            placeholder="Add instructions...",
+            disabled=input_disabled,
+            layout=widgets.Layout(width="232px"),
+        )
+        send_button = widgets.Button(
+            description="Send",
+            disabled=input_disabled,
+            layout=widgets.Layout(width="70px"),
+        )
+
+        def send(_button) -> None:
+            message = input_widget.value
+            input_widget.value = ""
+            self.submit_assist_message(assist_id, message)
+
+        send_button.on_click(send)
+        self._on_text_submit(input_widget, send)
+        self._assist_chat_inputs[assist_id] = input_widget
+
+        body_parts = [self._assist_css(), "<div class='aipy-assist-panel'>"]
+        body_parts.append(self._assist_history_html())
+        if status is not None:
+            class_name = "aipy-assist-status aipy-assist-error-text" if status_kind == "error" else "aipy-assist-status"
+            body_parts.append(f"<div class='{class_name}'>{escape(status)}</div>")
+        if proposal_html is not None:
+            body_parts.append(f"<div class='aipy-assist-proposal'>{proposal_html}</div>")
+        body_parts.append("</div>")
+
+        children: list[Any] = [widgets.HTML("".join(body_parts))]
+        if actions is not None:
+            children.append(actions)
+        input_row = widgets.HBox([input_widget, send_button])
+        input_row.add_class("aipy-assist-input-row")
+        children.append(input_row)
+        return children
+
+    def _on_text_submit(self, input_widget: Any, callback: Callable[[Any], None]) -> None:
+        dispatcher = getattr(input_widget, "_submission_callbacks", None)
+        if dispatcher is None:
+            raise RuntimeError("Assist chat input does not support Enter submission")
+        dispatcher.register_callback(callback)
+
+    def _assist_history_html(self) -> str:
+        if not self._ai_chat_events:
+            return "<div class='aipy-assist-history'></div>"
+        rows = []
+        for event in reversed(self._ai_chat_events):
+            role = escape(event["role"])
+            content = escape(event["content"])
+            rows.append(
+                f"<div class='aipy-assist-event-row aipy-assist-event-row-{role}'>"
+                f"<div class='aipy-assist-event aipy-assist-event-{role}'>{content}</div>"
+                "</div>"
+            )
+        return "<div class='aipy-assist-history'>" + "".join(rows) + "</div>"
 
     def _assist_status_html(self, message: str, *, kind: str = "info") -> str:
         class_name = "aipy-assist-bubble aipy-assist-error" if kind == "error" else "aipy-assist-bubble"
@@ -494,30 +678,88 @@ class AIForm:
   left: calc(100% + 12px);
   top: -40px;
   z-index: 2147483647;
-}
-.aipy-assist-proposal-wrap {
-  top: -130px;
-}
-.aipy-assist-bubble-wrap .widget-hbox {
-  z-index: 2147483647;
-}
-.aipy-assist-bubble {
-  position: relative;
   background: #ffffff;
   border: 1px solid #d1d5db;
   border-radius: 6px;
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
   color: #111827;
-  padding: 10px 12px 46px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
 }
-.aipy-assist-bubble p {
+.aipy-assist-panel {
+  position: relative;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: inherit;
+  padding: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.aipy-assist-panel p {
   margin: 8px 0;
+}
+.aipy-assist-history {
+  border-bottom: 1px solid #e5e7eb;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  max-height: 132px;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column-reverse;
+}
+.aipy-assist-event-row {
+  display: flex;
+  margin: 4px 0;
+}
+.aipy-assist-event-row-user {
+  justify-content: flex-end;
+}
+.aipy-assist-event-row-assistant {
+  justify-content: flex-start;
+}
+.aipy-assist-event {
+  font-size: 12px;
+  line-height: 1.35;
+  max-width: 82%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.aipy-assist-event-assistant {
+  background: #f3f4f6;
+  color: #111827;
+}
+.aipy-assist-event-user {
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+.aipy-assist-status {
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 0 0 8px;
+}
+.aipy-assist-error-text {
+  color: #991b1b;
+}
+.aipy-assist-proposal {
+  margin-bottom: 8px;
+  max-height: 120px;
+  overflow-y: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 8px;
+  background: #ffffff;
 }
 .aipy-assist-error {
   border-color: #dc2626;
   color: #991b1b;
 }
-.aipy-assist-error::before {
+.aipy-assist-bubble-wrap:has(.aipy-assist-error)::before {
   border-left-color: #dc2626;
   border-bottom-color: #dc2626;
 }
@@ -527,15 +769,17 @@ class AIForm:
   margin: 0;
 }
 .aipy-assist-bubble-wrap .widget-hbox {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
+  margin-top: 8px;
+  z-index: 2147483647;
+}
+.aipy-assist-bubble-wrap .aipy-assist-input-row {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 8px;
 }
 .aipy-assist-bubble-wrap .widget-button {
   height: 26px;
 }
-.aipy-assist-bubble::before {
+.aipy-assist-bubble-wrap::before {
   content: "";
   position: absolute;
   left: -7px;
@@ -548,15 +792,12 @@ class AIForm:
   transform: rotate(45deg);
   box-shadow: -4px 4px 8px rgba(15, 23, 42, 0.06);
 }
-.aipy-assist-proposal-wrap .aipy-assist-bubble::before {
-  top: 106px;
-}
 @media (max-width: 900px) {
   .aipy-assist-bubble-wrap {
     left: 0;
     top: 8px;
   }
-  .aipy-assist-bubble::before {
+  .aipy-assist-bubble-wrap::before {
     display: none;
   }
 }
