@@ -10,8 +10,16 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aipywidgets import AIConfig, AIForm, WhenIdle, fields
+from aipywidgets import AIConfig, AIForm, Action, WhenIdle, fields
 from aipywidgets.ai import parse_patch_proposal
+
+
+def single_step(*step_fields):
+    return [{"id": "main", "label": "Main", "fields": list(step_fields)}]
+
+
+def save_actions():
+    return [Action(id="save", label="Save")]
 
 
 class FakeResponses:
@@ -78,11 +86,12 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
-            ai=AIConfig(client=client, model="test-model"),
-            fields=[
+            steps=single_step(
                 fields.Textarea("abstract"),
                 fields.Tags("keywords"),
-            ],
+            ),
+            actions=save_actions(),
+            ai=AIConfig(client=client, model="test-model"),
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -108,8 +117,9 @@ class AITests(unittest.TestCase):
     def test_ai_assist_schema_does_not_use_untyped_array_items(self) -> None:
         client = FakeClient('{"message": "", "operations": []}')
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -138,8 +148,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -163,8 +174,9 @@ class AITests(unittest.TestCase):
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_chat_history_keeps_all_events_in_scroll_area(self) -> None:
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=FakeClient('{"message": "", "operations": []}'), model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         for index in range(8):
             form._record_ai_event("user" if index % 2 else "assistant", f"event {index}")
@@ -193,11 +205,12 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
-            ai=AIConfig(client=client, model="test-model"),
-            fields=[
+            steps=single_step(
                 fields.Textarea("abstract"),
                 fields.Tags("keywords"),
-            ],
+            ),
+            actions=save_actions(),
+            ai=AIConfig(client=client, model="test-model"),
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -219,8 +232,9 @@ class AITests(unittest.TestCase):
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_create_proposal_failure_logs_and_shows_error(self) -> None:
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=FailingClient(), model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -257,11 +271,12 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
-            ai=AIConfig(client=client, model="test-model"),
-            fields=[
+            steps=single_step(
                 fields.Textarea("abstract"),
                 fields.Tags("keywords"),
-            ],
+            ),
+            actions=save_actions(),
+            ai=AIConfig(client=client, model="test-model"),
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -293,8 +308,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -328,8 +344,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -357,7 +374,7 @@ class AITests(unittest.TestCase):
     def test_clear_assist_surfaces_can_keep_active_surface(self) -> None:
         import ipywidgets as widgets
 
-        form = AIForm(fields=[fields.Textarea("abstract"), fields.Tags("keywords")])
+        form = AIForm(steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")), actions=save_actions())
         form.widget()
         abstract_surface = form._assist_surfaces["abstract"]
         keywords_surface = form._assist_surfaces["keywords"]
@@ -383,8 +400,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -403,13 +421,13 @@ class AITests(unittest.TestCase):
         self.assertEqual(form._assist_surfaces["abstract"].children, ())
 
     def test_unknown_proposal_index_fails_fast(self) -> None:
-        form = AIForm(fields=[fields.Text("title")])
+        form = AIForm(steps=single_step(fields.Text("title")), actions=save_actions())
 
         with self.assertRaisesRegex(IndexError, "Proposal index out of range"):
             form.accept_proposal(0)
 
     def test_ai_assist_requires_config(self) -> None:
-        form = AIForm(fields=[fields.Text("title"), fields.Text("slug")])
+        form = AIForm(steps=single_step(fields.Text("title"), fields.Text("slug")), actions=save_actions())
 
         with self.assertRaisesRegex(RuntimeError, "requires AIConfig"):
             form.ai.assist(
@@ -431,8 +449,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -463,8 +482,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -492,8 +512,9 @@ class AITests(unittest.TestCase):
             )
         )
         form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
             ai=AIConfig(client=client, model="test-model"),
-            fields=[fields.Textarea("abstract"), fields.Tags("keywords")],
         )
         form.ai.assist(
             id="suggest_keywords",
@@ -507,9 +528,9 @@ class AITests(unittest.TestCase):
 
         form.set_value("abstract", "Text")
 
-        abstract_shell = rendered.children[0]
+        abstract_shell = rendered.children[2].children[0]
         self.assertIs(abstract_shell.children[0], form._widgets["abstract"])
-        self.assertEqual(abstract_shell.children[1].layout.height, "0px")
+        self.assertEqual(abstract_shell.children[2].layout.height, "0px")
         bubble = form._assist_surfaces["abstract"].children[0]
         self.assertIn("aipy-assist-bubble-wrap", bubble._dom_classes)
         self.assertIn("AI will suggest", bubble.children[0].value)

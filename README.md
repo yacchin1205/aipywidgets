@@ -38,15 +38,22 @@ jupyter lab
 Create and display a form in a notebook:
 
 ```python
-from aipywidgets import AIForm, fields
+from aipywidgets import AIForm, Action, fields
 
 form = AIForm(
     title="Paper metadata",
-    fields=[
-        fields.Text("doi", label="DOI"),
-        fields.Text("title", label="Title"),
-        fields.Int("year", label="Year"),
+    steps=[
+        {
+            "id": "main",
+            "label": "Main",
+            "fields": [
+                fields.Text("doi", label="DOI", full_width=True),
+                fields.Text("title", label="Title", full_width=True),
+                fields.Int("year", label="Year"),
+            ],
+        },
     ],
+    actions=[Action(id="save", label="Save", style="primary")],
 )
 
 form
@@ -69,36 +76,46 @@ form.set_value("title", "Example paper")
 
 ## Forms and Wizards
 
-A form can be a single-page form or a multi-step wizard.
+Every form is defined as one or more steps. A compact form uses a single step;
+larger workflows can split fields across multiple steps.
 
 ```python
-from aipywidgets import AIForm, fields
+from aipywidgets import AIForm, Action, fields
 
 form = AIForm(
     title="Paper metadata",
-    fields=[
-        fields.Text("doi", label="DOI"),
-        fields.Text("title", label="Title"),
-        fields.Array(
-            "authors",
-            label="Authors",
-            item=fields.Object(
-                fields=[
-                    fields.Text("given_name", label="Given name"),
-                    fields.Text("family_name", label="Family name"),
-                    fields.Text("orcid", label="ORCID"),
-                ],
-            ),
-        ),
-        fields.Int("year", label="Year"),
-        fields.Textarea("abstract", label="Abstract"),
+    steps=[
+        {
+            "id": "main",
+            "label": "Main",
+            "fields": [
+                fields.Text("doi", label="DOI", full_width=True),
+                fields.Text("title", label="Title", full_width=True),
+                fields.Array(
+                    "authors",
+                    label="Authors",
+                    item=fields.Object(
+                        fields=[
+                            fields.Text("given_name", label="Given name"),
+                            fields.Text("family_name", label="Family name"),
+                            fields.Text("orcid", label="ORCID"),
+                        ],
+                    ),
+                ),
+                fields.Int("year", label="Year"),
+                fields.Textarea("abstract", label="Abstract"),
+            ],
+        },
     ],
+    actions=[Action(id="save", label="Save", style="primary")],
 )
 
 form
 ```
 
-Wizard forms group fields into steps and provide previous / next navigation.
+Multi-step forms group fields into labeled steps. The UI shows one step at a time,
+uses `Previous` / `Next` navigation, and validates the current step before moving
+forward.
 
 ```python
 form = AIForm(
@@ -109,15 +126,15 @@ form = AIForm(
             "label": "File",
             "fields": [
                 fields.File("source_file", label="File"),
-                fields.Text("checksum", label="Checksum"),
+                fields.Text("checksum", label="Checksum", full_width=True),
             ],
         },
         {
             "id": "metadata",
             "label": "Metadata",
             "fields": [
-                fields.Text("title", label="Title"),
-                fields.Textarea("description", label="Description"),
+                fields.Text("title", label="Title", full_width=True),
+                fields.Textarea("description", label="Description", full_width=True),
                 fields.Tags("keywords", label="Keywords"),
             ],
         },
@@ -129,12 +146,25 @@ form = AIForm(
             ],
         },
     ],
+    actions=[Action(id="save", label="Save", style="primary")],
 )
+```
+
+Mark fields as required when the wizard should block `Next` until they are filled:
+
+```python
+fields.Text("title", label="Title", required=True)
+```
+
+Mark fields as `full_width=True` when they should expand to the full notebook form width:
+
+```python
+fields.Textarea("abstract", label="Abstract", full_width=True)
 ```
 
 ## Actions
 
-Forms can define explicit user actions such as saving, submitting, or depositing
+Forms must define explicit user actions such as saving, submitting, or depositing
 metadata. Action labels are defined in the form schema, while Python handlers are
 registered by action id.
 
@@ -435,7 +465,7 @@ The MVP should include:
 - Basic field definitions
 - Array and object fields for nested metadata
 - Field paths for nested reads, writes, hooks, and selections
-- Single-page forms
+- Step-based forms
 - Wizard-style step display
 - User actions for save, submit, deposit, or other explicit operations
 - Reading and setting form values

@@ -3,5 +3,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.python-version
 .isotty/
 .ipynb_checkpoints/

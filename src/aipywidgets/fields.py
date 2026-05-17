@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,6 +12,8 @@ class Field:
     label: str | None = None
     default: Any = None
     required: bool = False
+    full_width: bool = False
+    validator: Callable[[Any, dict[str, Any]], str | None] | None = None
 
     def make_widget(self):
         import ipywidgets as widgets
@@ -19,6 +22,24 @@ class Field:
 
     def empty_value(self) -> Any:
         return self.default
+
+    def validate(self, value: Any, values: dict[str, Any]) -> str | None:
+        if self.required and self._is_empty(value):
+            return "Required"
+        if self.validator is not None:
+            return self.validator(value, values)
+        return None
+
+    def _is_empty(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value is False
+        if isinstance(value, str):
+            return value.strip() == ""
+        if isinstance(value, (list, dict, tuple, set)):
+            return len(value) == 0
+        return False
 
 
 @dataclass
@@ -121,8 +142,17 @@ class Object(Field):
         fields: list[Field] | None = None,
         default: dict[str, Any] | None = None,
         required: bool = False,
+        full_width: bool = False,
+        validator: Callable[[Any, dict[str, Any]], str | None] | None = None,
     ) -> None:
-        super().__init__(id=id, label=label, default=default, required=required)
+        super().__init__(
+            id=id,
+            label=label,
+            default=default,
+            required=required,
+            full_width=full_width,
+            validator=validator,
+        )
         self.fields = fields or []
 
     def empty_value(self) -> dict[str, Any]:

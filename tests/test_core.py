@@ -10,10 +10,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from aipywidgets import AIForm, Action, fields
 
 
+def single_step(*step_fields):
+    return [{"id": "main", "label": "Main", "fields": list(step_fields)}]
+
+
+def save_actions():
+    return [Action(id="save", label="Save")]
+
+
 class CoreTests(unittest.TestCase):
     def test_get_and_set_value(self) -> None:
         form = AIForm(
-            fields=[
+            steps=single_step(
                 fields.Text("title"),
                 fields.Object(
                     "license",
@@ -22,7 +30,8 @@ class CoreTests(unittest.TestCase):
                         fields.Text("url"),
                     ],
                 ),
-            ]
+            ),
+            actions=save_actions(),
         )
 
         form.set_value("title", "Example")
@@ -33,7 +42,7 @@ class CoreTests(unittest.TestCase):
 
     def test_array_object_paths(self) -> None:
         form = AIForm(
-            fields=[
+            steps=single_step(
                 fields.Array(
                     "authors",
                     item=fields.Object(
@@ -44,7 +53,8 @@ class CoreTests(unittest.TestCase):
                     ),
                     default=[{"given_name": "", "family_name": ""}],
                 )
-            ]
+            ),
+            actions=save_actions(),
         )
 
         form.set_value("authors[0].family_name", "Lovelace")
@@ -54,7 +64,7 @@ class CoreTests(unittest.TestCase):
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_array_rerender_preserves_existing_widget_values(self) -> None:
         form = AIForm(
-            fields=[
+            steps=single_step(
                 fields.Array(
                     "authors",
                     label="Authors",
@@ -66,12 +76,13 @@ class CoreTests(unittest.TestCase):
                     ),
                     default=[{"given_name": "Ada", "family_name": "Lovelace"}],
                 )
-            ]
+            ),
+            actions=save_actions(),
         )
 
         root = form.widget()
-        array_widget = root.children[0]
-        add_button = array_widget.children[2]
+        array_widget = root.children[2].children[0]
+        add_button = array_widget.children[3]
 
         self.assertEqual(form._widgets["authors[0].given_name"].value, "Ada")
         self.assertEqual(form._widgets["authors[0].family_name"].value, "Lovelace")
@@ -83,8 +94,127 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(form._widgets["authors[0].family_name"].value, "Lovelace")
         self.assertEqual(form._widgets["authors[1].given_name"].value, "")
 
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_next_button_validates_required_fields_before_advancing(self) -> None:
+        form = AIForm(
+            steps=[
+                {
+                    "id": "metadata",
+                    "label": "Metadata",
+                    "fields": [fields.Text("title", required=True)],
+                },
+                {
+                    "id": "review",
+                    "label": "Review",
+                    "fields": [fields.Checkbox("confirmed")],
+                },
+            ]
+            ,
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+        next_button = root.children[3].children[0]
+        next_button.click()
+
+        self.assertEqual(form._current_step_index, 0)
+        self.assertIn("Required", form._error_widgets["title"].value)
+        self.assertIn("1 error in this step", root.children[1].value)
+
+        form.set_value("title", "Example")
+        next_button.click()
+
+        self.assertEqual(form._current_step_index, 1)
+        self.assertIn("Step 2 of 2", root.children[0].value)
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_previous_button_returns_to_prior_step(self) -> None:
+        form = AIForm(
+            steps=[
+                {"id": "metadata", "label": "Metadata", "fields": [fields.Text("title")]},
+                {"id": "review", "label": "Review", "fields": [fields.Checkbox("confirmed")]},
+            ],
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+        root.children[3].children[0].click()
+        root.children[3].children[0].click()
+
+        self.assertEqual(form._current_step_index, 0)
+        self.assertIn("Step 1 of 2", root.children[0].value)
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_required_checkbox_blocks_next_until_checked(self) -> None:
+        form = AIForm(
+            steps=[
+                {"id": "review", "label": "Review", "fields": [fields.Checkbox("confirmed", required=True)]},
+                {"id": "done", "label": "Done", "fields": [fields.Text("summary")]},
+            ],
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+        next_button = root.children[3].children[0]
+        next_button.click()
+
+        self.assertEqual(form._current_step_index, 0)
+        self.assertIn("Required", form._error_widgets["confirmed"].value)
+
+        form.set_value("confirmed", True)
+        next_button.click()
+
+        self.assertEqual(form._current_step_index, 1)
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_actions_are_only_visible_on_last_step(self) -> None:
+        form = AIForm(
+            steps=[
+                {"id": "metadata", "label": "Metadata", "fields": [fields.Text("title")]},
+                {"id": "review", "label": "Review", "fields": [fields.Checkbox("confirmed")]},
+            ],
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+
+        self.assertEqual(root.children[3].children[0].description, "Next")
+
+        root.children[3].children[0].click()
+
+        self.assertEqual(root.children[3].children[0].description, "Previous")
+        self.assertEqual(type(root.children[3].children[1]).__name__, "HBox")
+        self.assertEqual(root.children[3].children[1].children[0].description, "Save")
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_form_uses_full_width_and_right_aligned_navigation(self) -> None:
+        form = AIForm(
+            steps=single_step(fields.Text("title", full_width=True)),
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+
+        self.assertEqual(root.layout.width, "100%")
+        self.assertEqual(root.children[2].layout.width, "100%")
+        self.assertEqual(root.children[3].layout.width, "100%")
+        self.assertEqual(root.children[3].layout.justify_content, "flex-end")
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_full_width_field_expands_widget_and_shell(self) -> None:
+        form = AIForm(
+            steps=single_step(fields.Text("title", full_width=True)),
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+        shell = root.children[2].children[0]
+
+        self.assertEqual(form._widgets["title"].layout.width, "calc(100% - 8px)")
+        self.assertEqual(shell.layout.width, "100%")
+
     def test_hook_updates_values(self) -> None:
-        form = AIForm(fields=[fields.Text("title"), fields.Text("slug")])
+        form = AIForm(steps=single_step(fields.Text("title"), fields.Text("slug")), actions=save_actions())
 
         @form.on_change("title")
         def update_slug(ctx):
@@ -95,7 +225,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(form.get_value("slug"), "example-paper")
 
     def test_cycle_detection(self) -> None:
-        form = AIForm(fields=[fields.Text("title"), fields.Text("slug")])
+        form = AIForm(steps=single_step(fields.Text("title"), fields.Text("slug")), actions=save_actions())
 
         @form.on_change("title")
         def update_slug(ctx):
@@ -109,7 +239,10 @@ class CoreTests(unittest.TestCase):
             form.set_value("title", "Start")
 
     def test_action_handler(self) -> None:
-        form = AIForm(fields=[fields.Text("title")], actions=[Action(id="save", label="Save")])
+        form = AIForm(
+            steps=single_step(fields.Text("title")),
+            actions=save_actions(),
+        )
         calls = []
 
         @form.on_action("save")
@@ -121,31 +254,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(calls, ["save"])
 
     def test_missing_action_handler_fails_fast(self) -> None:
-        form = AIForm(actions=[Action(id="save", label="Save")])
+        form = AIForm(steps=single_step(), actions=save_actions())
 
         with self.assertRaisesRegex(RuntimeError, "No handler registered"):
             form._run_action(form.actions[0])
 
     def test_step_without_fields_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing required 'fields'"):
-            AIForm(steps=[{"id": "broken"}])
+            AIForm(steps=[{"id": "broken"}], actions=save_actions())
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_array_without_item_schema_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires an item schema"):
-            AIForm(fields=[fields.Array("authors")])
+            AIForm(steps=single_step(fields.Array("authors")), actions=save_actions())
 
     def test_duplicate_field_ids_fail_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "Duplicate field id"):
-            AIForm(fields=[fields.Text("title"), fields.Text("title")])
-
-    def test_fields_and_steps_are_mutually_exclusive(self) -> None:
-        with self.assertRaisesRegex(ValueError, "cannot define both fields and steps"):
-            AIForm(fields=[fields.Text("title")], steps=[{"id": "metadata", "fields": []}])
+            AIForm(steps=single_step(fields.Text("title"), fields.Text("title")), actions=save_actions())
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_margin_bottom_style_adds_bottom_spacer(self) -> None:
-        form = AIForm(fields=[fields.Text("title")], style={"margin_bottom": "360px"})
+        form = AIForm(steps=single_step(fields.Text("title")), actions=save_actions(), style={"margin_bottom": "360px"})
 
         root = form.widget()
         spacer = root.children[-1]
@@ -155,14 +284,18 @@ class CoreTests(unittest.TestCase):
 
     def test_unknown_style_key_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported AIForm style key"):
-            AIForm(fields=[fields.Text("title")], style={"assist_margin": "360px"})
+            AIForm(steps=single_step(fields.Text("title")), actions=save_actions(), style={"assist_margin": "360px"})
 
     def test_invalid_style_value_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "non-empty string"):
-            AIForm(fields=[fields.Text("title")], style={"margin_bottom": ""})
+            AIForm(steps=single_step(fields.Text("title")), actions=save_actions(), style={"margin_bottom": ""})
+
+    def test_missing_actions_fail_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "At least one action is required"):
+            AIForm(steps=single_step(), actions=[])
 
     def test_unknown_action_handler_fails_fast(self) -> None:
-        form = AIForm(actions=[Action(id="save", label="Save")])
+        form = AIForm(steps=single_step(), actions=save_actions())
 
         with self.assertRaisesRegex(ValueError, "Unknown action id"):
 
@@ -171,7 +304,7 @@ class CoreTests(unittest.TestCase):
                 raise AssertionError("should not register")
 
     def test_duplicate_action_handler_fails_fast(self) -> None:
-        form = AIForm(actions=[Action(id="save", label="Save")])
+        form = AIForm(steps=single_step(), actions=save_actions())
 
         @form.on_action("save")
         def save(ctx):
