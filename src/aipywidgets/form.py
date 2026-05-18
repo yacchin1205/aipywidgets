@@ -8,11 +8,13 @@ from html import escape
 from typing import Any
 
 from .actions import Action
+from .assist_layer import AssistLayer
 from .ai import AIAssistManager, AIConversationRunner, PatchProposal
 from .field_path import get_in, parse_field_path, set_in
 from .fields import Array, Field, Object
 
 logger = logging.getLogger(__name__)
+_FORM_RENDER_COUNTER = 0
 
 
 @dataclass
@@ -100,10 +102,12 @@ class AIForm:
         self._assist_attention: dict[str, str] = {}
         self._assist_errors: dict[str, BaseException] = {}
         self._assist_surfaces: dict[str, Any] = {}
+        self._assist_anchors: dict[str, Any] = {}
         self._assist_chat_inputs: dict[str, Any] = {}
         self._error_widgets: dict[str, Any] = {}
         self._field_defs: dict[str, Field] = {}
         self._current_step_index = 0
+        self._dom_token = self._next_dom_token()
         self._step_title_widget = None
         self._step_summary_widget = None
         self._step_body_widget = None
@@ -111,6 +115,8 @@ class AIForm:
         self._actions_box = None
         self._errors: dict[str, str] = {}
         self._message_widget = None
+        self._root_widget = None
+        self._assist_layer_widget = None
 
     def get_values(self) -> dict[str, Any]:
         return self._values
@@ -269,12 +275,18 @@ class AIForm:
         )
         self._message_widget = widgets.HTML("")
         children.append(self._message_widget)
+        self._assist_layer_widget = AssistLayer(layout=widgets.Layout(width="100%", height="0px", overflow="visible"))
+        self._assist_layer_widget.form_dom_class = self._form_dom_class()
+        self._assist_layer_widget.add_class("aipy-assist-layer")
+        children.append(self._assist_layer_widget)
         margin_bottom = self.style.get("margin_bottom")
         if margin_bottom is not None:
             spacer = widgets.Box(layout=widgets.Layout(height=margin_bottom))
             spacer.add_class("aipy-form-margin-bottom")
             children.append(spacer)
         root = widgets.VBox(children, layout=widgets.Layout(width="100%"))
+        root.add_class(self._form_dom_class())
+        self._root_widget = root
         self._render_current_step()
         return root
 
@@ -388,13 +400,12 @@ class AIForm:
             widget.observe(lambda change, p=path: self._on_widget_change(p, change), names="value")
         error_widget = widgets.HTML("")
         self._error_widgets[path] = error_widget
-        surface = widgets.VBox([], layout=widgets.Layout(height="0px", overflow="visible"))
-        surface.add_class("aipy-assist-surface")
-        self._assist_surfaces[path] = surface
-        shell = widgets.VBox([widget, error_widget, surface], layout=widgets.Layout(overflow="visible"))
+        shell = widgets.VBox([widget, error_widget], layout=widgets.Layout(overflow="visible"))
         if field.full_width:
             shell.layout.width = "100%"
         shell.add_class("aipy-field-shell")
+        shell.add_class(self._anchor_dom_class(path))
+        self._assist_anchors[path] = shell
         return shell
 
     def _array_widget(self, field: Array, path: str):
@@ -449,9 +460,12 @@ class AIForm:
         label = escape(self._step_title(step))
         self._widgets = {}
         self._assist_surfaces = {}
+        self._assist_anchors = {}
         self._assist_chat_inputs = {}
         self._error_widgets = {}
         self._field_defs = {}
+        if self._assist_layer_widget is not None:
+            self._assist_layer_widget.children = ()
         self._step_title_widget.value = (
             f"<h4>Step {self._current_step_index + 1} of {len(self.steps)}: {label}</h4>"
         )
@@ -613,19 +627,21 @@ class AIForm:
         attention_path = self._assist_attention.get(assist_id)
         if attention_path is None:
             return
-        surface = self._assist_surfaces.get(attention_path)
-        if surface is None:
+        if self._assist_layer_widget is None:
             return
 
         import ipywidgets as widgets
 
         self._clear_assist_surfaces(except_path=attention_path)
+        self._assist_layer_widget.anchor_dom_class = self._anchor_dom_class(attention_path)
+        self._assist_layer_widget.placement = "right"
         state = self._assist_state.get(assist_id)
         if state == "waiting":
-            surface.children = (
+            self._assist_layer_widget.children = (
                 self._assist_bubble(
                     self._assist_chat_children(
                         assist_id,
+                        attention_path=attention_path,
                         status="AI will suggest after input settles...",
                         input_disabled=False,
                     )
@@ -633,10 +649,11 @@ class AIForm:
             )
             return
         if state == "generating":
-            surface.children = (
+            self._assist_layer_widget.children = (
                 self._assist_bubble(
                     self._assist_chat_children(
                         assist_id,
+                        attention_path=attention_path,
                         status="Generating suggestion...",
                         input_disabled=True,
                     )
@@ -648,10 +665,11 @@ class AIForm:
             message = "AI suggestion failed."
             if error is not None:
                 message = f"AI suggestion failed: {type(error).__name__}: {error}"
-            surface.children = (
+            self._assist_layer_widget.children = (
                 self._assist_bubble(
                     self._assist_chat_children(
                         assist_id,
+                        attention_path=attention_path,
                         status=message,
                         status_kind="error",
                         input_disabled=False,
@@ -660,10 +678,11 @@ class AIForm:
             )
             return
         if state == "chat":
-            surface.children = (
+            self._assist_layer_widget.children = (
                 self._assist_bubble(
                     self._assist_chat_children(
                         assist_id,
+                        attention_path=attention_path,
                         status="Add instructions to adjust the proposal.",
                         input_disabled=False,
                     )
@@ -684,10 +703,11 @@ class AIForm:
         accept_button.disabled = proposal.stale
         accept_button.on_click(lambda _button, i=proposal_index: self.accept_proposal(i))
         reject_button.on_click(lambda _button, i=proposal_index: self.reject_proposal(i))
-        surface.children = (
+        self._assist_layer_widget.children = (
             self._assist_bubble(
                 self._assist_chat_children(
                     assist_id,
+                    attention_path=attention_path,
                     proposal_html=(
                         f"<strong>AI proposal{stale}</strong>"
                         f"<p>{escape(proposal.message)}</p>"
@@ -701,10 +721,10 @@ class AIForm:
         )
 
     def _clear_assist_surfaces(self, *, except_path: str | None = None) -> None:
-        for path, surface in self._assist_surfaces.items():
-            if path == except_path:
-                continue
-            surface.children = ()
+        if self._assist_layer_widget is None:
+            return
+        if except_path is None:
+            self._assist_layer_widget.children = ()
 
     def _assist_bubble(self, children: list[Any], *, proposal: bool = False):
         import ipywidgets as widgets
@@ -719,6 +739,7 @@ class AIForm:
         self,
         assist_id: str,
         *,
+        attention_path: str,
         status: str | None = None,
         status_kind: str = "info",
         proposal_html: str | None = None,
@@ -798,7 +819,7 @@ class AIForm:
   max-width: 100%;
   z-index: 2147483647;
 }
-.aipy-assist-surface {
+.aipy-assist-layer {
   position: relative;
   height: 0 !important;
   overflow: visible !important;
@@ -806,8 +827,8 @@ class AIForm:
 }
 .aipy-assist-bubble-wrap {
   position: absolute;
-  left: calc(100% + 12px);
-  top: -40px;
+  left: 0;
+  top: 0;
   z-index: 2147483647;
   background: #ffffff;
   border: 1px solid #d1d5db;
@@ -953,3 +974,16 @@ class AIForm:
             if isinstance(value, str) and len(value.strip()) < assist.trigger.min_chars:
                 return False
         return True
+
+    @staticmethod
+    def _next_dom_token() -> str:
+        global _FORM_RENDER_COUNTER
+        _FORM_RENDER_COUNTER += 1
+        return f"aipy-form-{_FORM_RENDER_COUNTER}"
+
+    def _form_dom_class(self) -> str:
+        return self._dom_token
+
+    def _anchor_dom_class(self, path: str) -> str:
+        token = "".join(char if char.isalnum() else "-" for char in path)
+        return f"{self._dom_token}-anchor-{token}"

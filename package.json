@@ -1,0 +1,35 @@
+{
+  "name": "aipywidgets",
+  "version": "0.0.0",
+  "description": "AI-assisted form widgets for Jupyter Notebook and JupyterLab",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "files": [
+    "lib/**/*.js"
+  ],
+  "scripts": {
+    "build": "jupyter labextension build ."
+  },
+  "dependencies": {
+    "@jupyter-widgets/base": "^6.0.11",
+    "@jupyter-widgets/controls": "^5.0.12"
+  },
+  "devDependencies": {
+    "@jupyterlab/application": "^4.0.0",
+    "@jupyterlab/builder": "^4.0.0"
+  },
+  "jupyterlab": {
+    "extension": "lib/plugin",
+    "outputDir": "labextension",
+    "sharedPackages": {
+      "@jupyter-widgets/base": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyter-widgets/controls": {
+        "bundled": false,
+        "singleton": true
+      }
+    }
+  }
+}

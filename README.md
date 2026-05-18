@@ -25,16 +25,19 @@ AI integration, chat tools, and approval flows.
 
 ## Getting Started
 
-Install directly from Git:
+Install the release wheel from GitHub Releases:
 
 ```bash
-pip install "aipywidgets @ git+https://github.com/yacchin1205/aipywidgets.git@v2026.05.1"
+pip install "https://github.com/yacchin1205/aipywidgets/releases/download/v2026.05.1/aipywidgets-2026.5.1-py3-none-any.whl"
 ```
 
 During early development, install from a local checkout:
 
 ```bash
 pip install -e ".[dev]"
+npm ci
+npm run build
+jupyter labextension develop . --overwrite
 ```
 
 Open JupyterLab:

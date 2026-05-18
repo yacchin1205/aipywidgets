@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-jupyter-builder", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "aipywidgets"
-version = "0.1.0"
+dynamic = ["version"]
 description = "AI-assisted form widgets for Jupyter Notebook and JupyterLab"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,3 +30,23 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aipywidgets"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"labextension" = "share/jupyter/labextensions/aipywidgets"
+
+[tool.hatch.build.hooks.jupyter-builder]
+dependencies = ["hatch-jupyter-builder"]
+build-function = "hatch_jupyter_builder.npm_builder"
+ensured-targets = [
+    "labextension/package.json",
+    "labextension/static/style.js",
+]
+
+[tool.hatch.build.hooks.jupyter-builder.build-kwargs]
+build_cmd = "build"

@@ -254,7 +254,7 @@ class AITests(unittest.TestCase):
         self.assertIn("AI assist proposal failed: suggest_keywords", "\n".join(logs.output))
         self.assertEqual(form._assist_state["suggest_keywords"], "error")
         self.assertIsInstance(form._assist_errors["suggest_keywords"], RuntimeError)
-        error_bubble = form._assist_surfaces["abstract"].children[0].children[0].value
+        error_bubble = form._assist_layer_widget.children[0].children[0].value
         self.assertIn("AI suggestion failed", error_bubble)
         self.assertIn("RuntimeError", error_bubble)
         self.assertIn("upstream unavailable", error_bubble)
@@ -326,7 +326,7 @@ class AITests(unittest.TestCase):
 
         form.reject_proposal(0)
 
-        bubble = form._assist_surfaces["abstract"].children[0]
+        bubble = form._assist_layer_widget.children[0]
         self.assertIn("Add instructions", bubble.children[0].value)
         self.assertFalse(bubble.children[-1].children[0].disabled)
         self.assertEqual(form._assist_state["suggest_keywords"], "chat")
@@ -376,16 +376,12 @@ class AITests(unittest.TestCase):
 
         form = AIForm(steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")), actions=save_actions())
         form.widget()
-        abstract_surface = form._assist_surfaces["abstract"]
-        keywords_surface = form._assist_surfaces["keywords"]
         active_child = widgets.HTML("active")
-        abstract_surface.children = (active_child,)
-        keywords_surface.children = (widgets.HTML("inactive"),)
+        form._assist_layer_widget.children = (active_child,)
 
         form._clear_assist_surfaces(except_path="abstract")
 
-        self.assertEqual(abstract_surface.children, (active_child,))
-        self.assertEqual(keywords_surface.children, ())
+        self.assertEqual(form._assist_layer_widget.children, (active_child,))
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_accept_proposal_closes_assist_bubble(self) -> None:
@@ -418,7 +414,7 @@ class AITests(unittest.TestCase):
 
         form.accept_proposal(0)
 
-        self.assertEqual(form._assist_surfaces["abstract"].children, ())
+        self.assertEqual(form._assist_layer_widget.children, ())
 
     def test_unknown_proposal_index_fails_fast(self) -> None:
         form = AIForm(steps=single_step(fields.Text("title")), actions=save_actions())
@@ -530,14 +526,14 @@ class AITests(unittest.TestCase):
 
         abstract_shell = rendered.children[2].children[0]
         self.assertIs(abstract_shell.children[0], form._widgets["abstract"])
-        self.assertEqual(abstract_shell.children[2].layout.height, "0px")
-        bubble = form._assist_surfaces["abstract"].children[0]
+        self.assertEqual(len(abstract_shell.children), 2)
+        bubble = form._assist_layer_widget.children[0]
         self.assertIn("aipy-assist-bubble-wrap", bubble._dom_classes)
         self.assertIn("AI will suggest", bubble.children[0].value)
         self.assertIn("aipy-assist-bubble", bubble.children[0].value)
         self.assertNotIn("aipy-assist-proposal-wrap {\n  top:", bubble.children[0].value)
         self.assertNotIn("aipy-assist-proposal-wrap::before", bubble.children[0].value)
-        self.assertEqual(form._assist_surfaces["keywords"].children, ())
+        self.assertEqual(len(form._assist_layer_widget.children), 1)
 
     def test_ai_config_requires_explicit_client(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "AIConfig.client is required"):

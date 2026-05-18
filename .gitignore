@@ -6,3 +6,6 @@ __pycache__/
 .python-version
 .isotty/
 .ipynb_checkpoints/
+node_modules/
+labextension/
+dist/
