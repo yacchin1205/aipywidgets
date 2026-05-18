@@ -9,7 +9,7 @@ from typing import Any
 
 from .actions import Action
 from .assist_layer import AssistLayer
-from .ai import AIAssistManager, AIConversationRunner, PatchProposal
+from .ai import AIAssistManager, AIConversationRunner, PatchProposal, ToolApprovalProposal
 from .field_path import get_in, parse_field_path, set_in
 from .fields import Array, Field, Object
 
@@ -95,7 +95,7 @@ class AIForm:
         self._ai_runner = AIConversationRunner(self)
         self._ai_conversation_items: list[dict[str, Any]] = []
         self._ai_chat_events: list[dict[str, str]] = []
-        self.proposals: list[PatchProposal] = []
+        self.proposals: list[PatchProposal | ToolApprovalProposal] = []
         self.approval_events: list[dict[str, Any]] = []
         self._attention_path: str | None = None
         self._assist_state: dict[str, str] = {}
@@ -172,20 +172,41 @@ class AIForm:
         proposal = self._proposal_at(index)
         if proposal.stale:
             raise RuntimeError("Cannot accept a stale AI proposal")
-        for operation in proposal.operations:
-            self.set_value(operation.path, operation.value)
-        self.approval_events.append({"status": "accepted", "proposal": proposal})
-        self._record_approval_result("accepted", proposal)
         del self.proposals[index]
-        if proposal.assist_id is not None:
-            self._assist_state[proposal.assist_id] = "accepted"
-            self._clear_assist_surfaces()
+        if isinstance(proposal, PatchProposal):
+            for operation in proposal.operations:
+                self.set_value(operation.path, operation.value)
+            self.approval_events.append({"status": "accepted", "proposal": proposal})
+            self._record_patch_approval_result("accepted", proposal)
+            if proposal.assist_id is not None:
+                self._assist_state[proposal.assist_id] = "accepted"
+                self._clear_assist_surfaces()
+            return
+        if proposal.assist_id is None:
+            raise RuntimeError("External tool proposal is missing assist_id")
+        self._assist_state[proposal.assist_id] = "generating"
+        self._render_assist_surface(proposal.assist_id)
+        try:
+            next_proposal = self._ai_runner.continue_after_tool_approval(proposal)
+        except Exception:
+            self._assist_state[proposal.assist_id] = "error"
+            self._render_assist_surface(proposal.assist_id)
+            raise
+        self.proposals = [existing for existing in self.proposals if existing.assist_id != proposal.assist_id]
+        self.proposals.append(next_proposal)
+        self.approval_events.append({"status": "accepted", "proposal": proposal})
+        self._assist_errors.pop(proposal.assist_id, None)
+        self._assist_state[proposal.assist_id] = "proposal"
+        self._render_assist_surface(proposal.assist_id)
 
     def reject_proposal(self, index: int) -> None:
         proposal = self._proposal_at(index)
         self.approval_events.append({"status": "rejected", "proposal": proposal})
-        self._record_approval_result("rejected", proposal)
         del self.proposals[index]
+        if isinstance(proposal, PatchProposal):
+            self._record_patch_approval_result("rejected", proposal)
+        else:
+            self._record_tool_rejection(proposal)
         if proposal.assist_id is not None:
             self._assist_state[proposal.assist_id] = "chat"
             self._render_assist_surface(proposal.assist_id)
@@ -203,7 +224,7 @@ class AIForm:
         self._assist_errors.pop(assist_id, None)
         self._render_assist_surface(assist_id)
 
-    def create_proposal(self, assist_id: str) -> PatchProposal:
+    def create_proposal(self, assist_id: str) -> PatchProposal | ToolApprovalProposal:
         try:
             assist = self.ai.get(assist_id)
             if not self.ai.is_dirty(assist_id):
@@ -227,7 +248,7 @@ class AIForm:
         self._render_assist_surface(assist_id)
         return proposal
 
-    def submit_assist_message(self, assist_id: str, message: str) -> PatchProposal:
+    def submit_assist_message(self, assist_id: str, message: str) -> PatchProposal | ToolApprovalProposal:
         if not message.strip():
             raise ValueError("AI assist message is required")
         try:
@@ -600,7 +621,7 @@ class AIForm:
     def _record_ai_event(self, role: str, content: str) -> None:
         self._ai_chat_events.append({"role": role, "content": content})
 
-    def _record_approval_result(self, status: str, proposal: PatchProposal) -> None:
+    def _record_patch_approval_result(self, status: str, proposal: PatchProposal) -> None:
         operations = [
             {"op": operation.op, "path": operation.path, "value": operation.value}
             for operation in proposal.operations
@@ -617,6 +638,19 @@ class AIForm:
         )
         self._ai_conversation_items.append({"role": "user", "content": content})
         self._record_ai_event("user", f"{status.capitalize()} proposal.")
+
+    def _record_tool_rejection(self, proposal: ToolApprovalProposal) -> None:
+        self._ai_conversation_items.append(
+            {
+                "type": "function_call_output",
+                "call_id": proposal.tool_call_id,
+                "output": json.dumps(
+                    {"status": "rejected", "message": "User rejected the external tool request."},
+                    ensure_ascii=False,
+                ),
+            }
+        )
+        self._record_ai_event("user", "Rejected proposal.")
 
     def _focus_assist_input(self, assist_id: str) -> None:
         input_widget = self._assist_chat_inputs.get(assist_id)
@@ -694,25 +728,39 @@ class AIForm:
             return
         proposal = self.proposals[proposal_index]
         stale = " <em>(stale)</em>" if proposal.stale else ""
-        operations = "<br>".join(
-            f"<code>{escape(operation.path)}</code> = {escape(repr(operation.value))}"
-            for operation in proposal.operations
-        )
         accept_button = widgets.Button(description="Accept", button_style="success")
         reject_button = widgets.Button(description="Reject", button_style="warning")
         accept_button.disabled = proposal.stale
         accept_button.on_click(lambda _button, i=proposal_index: self.accept_proposal(i))
         reject_button.on_click(lambda _button, i=proposal_index: self.reject_proposal(i))
+        if isinstance(proposal, PatchProposal):
+            proposal_html = (
+                f"<strong>AI proposal{stale}</strong>"
+                f"<p>{escape(proposal.message)}</p>"
+                f"<div class='aipy-assist-operations'>"
+                + "<br>".join(
+                    f"<code>{escape(operation.path)}</code> = {escape(repr(operation.value))}"
+                    for operation in proposal.operations
+                )
+                + "</div>"
+            )
+        else:
+            proposal_html = (
+                f"<strong>External tool proposal{stale}</strong>"
+                f"<p>{escape(proposal.message)}</p>"
+                f"<div class='aipy-assist-operations'>"
+                + "<br>".join(
+                    f"<code>{escape(str(key))}</code> = {escape(repr(value))}"
+                    for key, value in proposal.preview.items()
+                )
+                + "</div>"
+            )
         self._assist_layer_widget.children = (
             self._assist_bubble(
                 self._assist_chat_children(
                     assist_id,
                     attention_path=attention_path,
-                    proposal_html=(
-                        f"<strong>AI proposal{stale}</strong>"
-                        f"<p>{escape(proposal.message)}</p>"
-                        f"<div class='aipy-assist-operations'>{operations}</div>"
-                    ),
+                    proposal_html=proposal_html,
                     actions=widgets.HBox([accept_button, reject_button]),
                     input_disabled=True,
                 ),
@@ -975,7 +1023,7 @@ class AIForm:
 </style>
 """
 
-    def _proposal_at(self, index: int) -> PatchProposal:
+    def _proposal_at(self, index: int) -> PatchProposal | ToolApprovalProposal:
         if index < 0 or index >= len(self.proposals):
             raise IndexError(f"Proposal index out of range: {index}")
         return self.proposals[index]

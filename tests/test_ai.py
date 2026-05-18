@@ -10,8 +10,9 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aipywidgets import AIConfig, AIForm, Action, WhenIdle, fields
-from aipywidgets.ai import parse_patch_proposal
+from aipywidgets import AIConfig, AIForm, AIAssistTool, Action, WhenIdle, fields
+from aipywidgets.ai import ToolApprovalProposal, parse_patch_proposal
+from aipywidgets.ai_tools import ToolApprovalRequest
 
 
 def single_step(*step_fields):
@@ -45,6 +46,22 @@ class FakeResponses:
 class FakeClient:
     def __init__(self, output_text: str) -> None:
         self.responses = FakeResponses(output_text)
+
+
+class SequenceResponses:
+    def __init__(self, outputs) -> None:
+        self.outputs = outputs
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        output = self.outputs[len(self.calls) - 1]
+        return SimpleNamespace(output=[output], output_text="")
+
+
+class SequenceClient:
+    def __init__(self, outputs) -> None:
+        self.responses = SequenceResponses(outputs)
 
 
 class FailingResponses:
@@ -182,6 +199,144 @@ class AITests(unittest.TestCase):
         self.assertIn("rejected", json.dumps(second_input))
         self.assertIn("Use domain-specific terms.", json.dumps(second_input))
         self.assertEqual(len(form.proposals), 1)
+
+    def test_external_tool_requires_approval_before_patch_proposal(self) -> None:
+        executed = []
+        tool = AIAssistTool(
+            name="fetchUrlMetadata",
+            description="Fetch metadata after approval.",
+            parameters={
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            proposal_builder=lambda args: ToolApprovalRequest(
+                message="Fetch URL metadata after approval.",
+                preview={"url": args["url"]},
+            ),
+            executor=lambda args: executed.append(args) or {
+                "status": "completed",
+                "type": "fetched_url_metadata",
+                "url": args["url"],
+                "title": "Example",
+            },
+        )
+        client = SequenceClient(
+            [
+                {
+                    "type": "function_call",
+                    "name": "fetchUrlMetadata",
+                    "call_id": "call_tool",
+                    "arguments": json.dumps({"url": "https://example.com"}),
+                },
+                {
+                    "type": "function_call",
+                    "name": "propose_form_update",
+                    "call_id": "call_patch",
+                    "arguments": json.dumps(
+                        {
+                            "message": "Use fetched metadata.",
+                            "operations": [
+                                {"op": "set", "path": "keywords", "value": ["example", "metadata"]}
+                            ],
+                        }
+                    ),
+                },
+            ]
+        )
+        form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
+            ai=AIConfig(client=client, model="test-model", tools=[tool]),
+        )
+        form.ai.assist(
+            id="suggest_keywords",
+            label="Suggest keywords",
+            watch=["abstract"],
+            trigger=WhenIdle(ms=100000),
+            prompt="Suggest",
+            outputs={"keywords": "Keywords"},
+        )
+
+        form.set_value("abstract", "Text")
+        proposal = form.create_proposal("suggest_keywords")
+
+        self.assertIsInstance(proposal, ToolApprovalProposal)
+        self.assertEqual(proposal.tool_name, "fetchUrlMetadata")
+        self.assertEqual(executed, [])
+
+        form.accept_proposal(0)
+
+        self.assertEqual(executed, [{"url": "https://example.com"}])
+        self.assertEqual(len(form.proposals), 1)
+        self.assertEqual(form.proposals[0].operations[0].value, ["example", "metadata"])
+        second_input = client.responses.calls[1]["input"]
+        self.assertIn("fetched_url_metadata", json.dumps(second_input))
+
+    def test_rejected_external_tool_is_recorded_for_next_message(self) -> None:
+        tool = AIAssistTool(
+            name="fetchUrlMetadata",
+            description="Fetch metadata after approval.",
+            parameters={
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            proposal_builder=lambda args: ToolApprovalRequest(
+                message="Fetch URL metadata after approval.",
+                preview={"url": args["url"]},
+            ),
+            executor=lambda args: {
+                "status": "completed",
+                "type": "fetched_url_metadata",
+                "url": args["url"],
+            },
+        )
+        client = SequenceClient(
+            [
+                {
+                    "type": "function_call",
+                    "name": "fetchUrlMetadata",
+                    "call_id": "call_tool",
+                    "arguments": json.dumps({"url": "https://example.com"}),
+                },
+                {
+                    "type": "function_call",
+                    "name": "propose_form_update",
+                    "call_id": "call_patch",
+                    "arguments": json.dumps(
+                        {
+                            "message": "Use direct keywords.",
+                            "operations": [{"op": "set", "path": "keywords", "value": ["manual"]}],
+                        }
+                    ),
+                },
+            ]
+        )
+        form = AIForm(
+            steps=single_step(fields.Textarea("abstract"), fields.Tags("keywords")),
+            actions=save_actions(),
+            ai=AIConfig(client=client, model="test-model", tools=[tool]),
+        )
+        form.ai.assist(
+            id="suggest_keywords",
+            label="Suggest keywords",
+            watch=["abstract"],
+            trigger=WhenIdle(ms=100000),
+            prompt="Suggest",
+            outputs={"keywords": "Keywords"},
+        )
+
+        form.set_value("abstract", "Text")
+        form.create_proposal("suggest_keywords")
+        form.reject_proposal(0)
+
+        form.submit_assist_message("suggest_keywords", "Do it without URL lookup.")
+
+        second_input = client.responses.calls[1]["input"]
+        self.assertIn('\\"status\\": \\"rejected\\"', json.dumps(second_input))
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_chat_history_keeps_all_events_in_scroll_area(self) -> None:

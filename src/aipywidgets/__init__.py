@@ -1,7 +1,8 @@
 import sys
 from .actions import Action
 from .assist_layer import AssistLayer
-from .ai import PatchOperation, PatchProposal, WhenIdle
+from .ai import PatchOperation, PatchProposal, ToolApprovalProposal, WhenIdle
+from .ai_tools import AIAssistTool
 from .config import AIConfig
 from .form import AIForm
 from . import fields
@@ -18,4 +19,15 @@ def _jupyter_labextension_paths():
     return [{"src": str(src_prefix), "dest": labext_name}]
 
 
-__all__ = ["AIConfig", "AIForm", "Action", "AssistLayer", "PatchOperation", "PatchProposal", "WhenIdle", "fields"]
+__all__ = [
+    "AIConfig",
+    "AIForm",
+    "Action",
+    "AssistLayer",
+    "AIAssistTool",
+    "PatchOperation",
+    "PatchProposal",
+    "ToolApprovalProposal",
+    "WhenIdle",
+    "fields",
+]

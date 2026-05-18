@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .ai_tools import AIAssistTool
 from .field_path import parse_field_path
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,19 @@ class PatchOperation:
 class PatchProposal:
     operations: list[PatchOperation]
     message: str = ""
+    assist_id: str | None = None
+    input_paths: tuple[str, ...] = ()
+    input_snapshot: dict[str, Any] | None = None
+    tool_call_id: str | None = None
+    stale: bool = False
+
+
+@dataclass(frozen=True)
+class ToolApprovalProposal:
+    tool_name: str
+    arguments: dict[str, Any]
+    message: str
+    preview: dict[str, Any]
     assist_id: str | None = None
     input_paths: tuple[str, ...] = ()
     input_snapshot: dict[str, Any] | None = None
@@ -156,54 +170,103 @@ class AIConversationRunner:
     def __init__(self, form: Any) -> None:
         self._form = form
 
-    def run(self, assist: AIAssist) -> PatchProposal:
+    def run(self, assist: AIAssist) -> PatchProposal | ToolApprovalProposal:
         prompt = self._initial_user_prompt(assist)
         return self.run_with_message(assist, prompt)
 
-    def run_with_message(self, assist: AIAssist, message: str) -> PatchProposal:
-        config = self._form.ai_config
-        if config is None:
-            raise RuntimeError("AI assist requires AIConfig")
-        client = config.get_client()
-        if not config.model:
-            raise RuntimeError("AI assist requires AIConfig.model")
-
+    def run_with_message(self, assist: AIAssist, message: str) -> PatchProposal | ToolApprovalProposal:
         input_snapshot = {path: self._form.get_value(path) for path in assist.watch}
         user_item = {"role": "user", "content": message}
-        input_items = [*self._form._ai_conversation_items, user_item]
-        response = client.responses.create(
-            model=config.model,
-            instructions=self._instructions(assist),
-            input=input_items,
-            tools=[self._proposal_tool(assist)],
-            tool_choice={"type": "function", "name": "propose_form_update"},
-        )
-        output_items = response_output_items(response)
-        proposal = self._proposal_from_tool_call(assist, output_items)
-        self._form._ai_conversation_items.extend([user_item, *output_items])
+        return self._run_turn(assist, input_snapshot=input_snapshot, new_items=[user_item])
+
+    def continue_after_tool_approval(self, proposal: ToolApprovalProposal) -> PatchProposal | ToolApprovalProposal:
+        config = self._require_config()
+        if proposal.assist_id is None:
+            raise RuntimeError("External tool proposal is missing assist_id")
+        assist = self._form.ai.get(proposal.assist_id)
+        tool = config.get_tool(proposal.tool_name)
+        output = tool.execute(proposal.arguments)
         self._form._ai_conversation_items.append(
             {
                 "type": "function_call_output",
                 "call_id": proposal.tool_call_id,
-                "output": json.dumps(
-                    {
-                        "status": "proposal_created",
-                        "message": proposal.message,
-                        "operations_count": len(proposal.operations),
-                    },
-                    ensure_ascii=False,
-                ),
+                "output": json.dumps(output, ensure_ascii=False),
             }
         )
-        self._form._record_ai_event("assistant", proposal.message or "Created a proposal.")
-        return PatchProposal(
+        self._form._record_ai_event("assistant", proposal.message or f"Executed {proposal.tool_name}.")
+        return self._run_turn(
+            assist,
+            input_snapshot=proposal.input_snapshot or {path: self._form.get_value(path) for path in assist.watch},
+            new_items=[],
+        )
+
+    def _run_turn(
+        self,
+        assist: AIAssist,
+        *,
+        input_snapshot: dict[str, Any],
+        new_items: list[dict[str, Any]],
+    ) -> PatchProposal | ToolApprovalProposal:
+        config = self._require_config()
+        client = config.get_client()
+        tools = [self._proposal_tool(assist), *[tool.definition() for tool in config.get_tools()]]
+        input_items = [*self._form._ai_conversation_items, *new_items]
+        request = {
+            "model": config.model,
+            "instructions": self._instructions(assist),
+            "input": input_items,
+            "tools": tools,
+            "parallel_tool_calls": False,
+        }
+        if not config.get_tools():
+            request["tool_choice"] = {"type": "function", "name": "propose_form_update"}
+        response = client.responses.create(**request)
+        output_items = response_output_items(response)
+        proposal = self._proposal_or_tool_request_from_output(assist, output_items)
+        self._form._ai_conversation_items.extend([*new_items, *output_items])
+        if isinstance(proposal, PatchProposal):
+            self._form._ai_conversation_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": proposal.tool_call_id,
+                    "output": json.dumps(
+                        {
+                            "status": "proposal_created",
+                            "message": proposal.message,
+                            "operations_count": len(proposal.operations),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+            self._form._record_ai_event("assistant", proposal.message or "Created a proposal.")
+            return PatchProposal(
+                assist_id=assist.id,
+                input_paths=assist.watch,
+                input_snapshot=input_snapshot,
+                message=proposal.message,
+                operations=proposal.operations,
+                tool_call_id=proposal.tool_call_id,
+            )
+        self._form._record_ai_event("assistant", proposal.message or f"Proposed {proposal.tool_name}.")
+        return ToolApprovalProposal(
+            tool_name=proposal.tool_name,
+            arguments=proposal.arguments,
+            message=proposal.message,
+            preview=proposal.preview,
             assist_id=assist.id,
             input_paths=assist.watch,
             input_snapshot=input_snapshot,
-            message=proposal.message,
-            operations=proposal.operations,
             tool_call_id=proposal.tool_call_id,
         )
+
+    def _require_config(self) -> Any:
+        config = self._form.ai_config
+        if config is None:
+            raise RuntimeError("AI assist requires AIConfig")
+        if not config.model:
+            raise RuntimeError("AI assist requires AIConfig.model")
+        return config
 
     def _initial_user_prompt(self, assist: AIAssist) -> str:
         watched_values = {path: self._form.get_value(path) for path in assist.watch}
@@ -236,9 +299,11 @@ class AIConversationRunner:
         outputs = json.dumps(assist.outputs, ensure_ascii=False, indent=2)
         return (
             "You help complete an aipywidgets form. "
-            "Use the propose_form_update tool when proposing form edits. "
+            "Use the available tools when needed. "
+            "propose_form_update creates a reviewable form proposal only; the UI applies accepted proposals. "
+            "External lookup tools create reviewable approval requests only and are not executed until the user approves them. "
+            "After approved tool outputs are returned to you, continue and eventually call propose_form_update. "
             "Do not claim that changes have been applied. "
-            "The tool creates a reviewable proposal only; the UI applies accepted proposals. "
             "Respect the allowed output paths and their meanings:\n"
             f"{outputs}"
         )
@@ -308,6 +373,19 @@ class AIConversationRunner:
             "required": ["message", "operations"],
         }
 
+    def _proposal_or_tool_request_from_output(
+        self,
+        assist: AIAssist,
+        output_items: list[dict[str, Any]],
+    ) -> PatchProposal | ToolApprovalProposal:
+        function_calls = [item for item in output_items if item.get("type") == "function_call"]
+        if len(function_calls) != 1:
+            raise RuntimeError("AI response must call exactly one tool")
+        item = function_calls[0]
+        if item.get("name") == "propose_form_update":
+            return self._proposal_from_tool_call(assist, output_items)
+        return self._tool_request_from_call(item)
+
     def _proposal_from_tool_call(self, assist: AIAssist, output_items: list[dict[str, Any]]) -> PatchProposal:
         for item in output_items:
             if item.get("type") != "function_call":
@@ -334,6 +412,30 @@ class AIConversationRunner:
                 tool_call_id=call_id,
             )
         raise RuntimeError("AI response did not call propose_form_update")
+
+    def _tool_request_from_call(self, item: dict[str, Any]) -> ToolApprovalProposal:
+        config = self._require_config()
+        tool = config.get_tool(str(item.get("name")))
+        arguments = item.get("arguments")
+        if isinstance(arguments, str):
+            data = json.loads(arguments)
+        elif isinstance(arguments, dict):
+            data = arguments
+        else:
+            raise TypeError(f"{tool.name} arguments must be a JSON object")
+        if not isinstance(data, dict):
+            raise TypeError(f"{tool.name} arguments must be a JSON object")
+        request = tool.build_proposal(data)
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise ValueError(f"{tool.name} call_id is required")
+        return ToolApprovalProposal(
+            tool_name=tool.name,
+            arguments=data,
+            message=request.message,
+            preview=request.preview,
+            tool_call_id=call_id,
+        )
 
 
 def extract_response_text(response: Any) -> str:
