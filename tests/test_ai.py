@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import importlib.util
 import sys
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +58,14 @@ class FailingClient:
 
 
 class AITests(unittest.TestCase):
+    def _set_value_in_running_loop(self, form: AIForm, path: str, value: str, *, cancel_assist_id: str | None = None) -> None:
+        async def scenario() -> None:
+            form.set_value(path, value)
+            if cancel_assist_id is not None:
+                form.ai._timers.pop(cancel_assist_id).cancel()
+
+        asyncio.run(scenario())
+
     def test_parse_patch_proposal(self) -> None:
         proposal = parse_patch_proposal(
             json.dumps(
@@ -75,44 +83,48 @@ class AITests(unittest.TestCase):
         self.assertEqual(proposal.operations[0].value, ["metadata", "dataset"])
 
     def test_ai_assist_creates_proposal_after_idle_without_applying_it(self) -> None:
-        client = FakeClient(
-            json.dumps(
-                {
-                    "message": "Use generated keywords.",
-                    "operations": [
-                        {"op": "set", "path": "keywords", "value": ["ai", "metadata"]}
-                    ],
-                }
+        async def scenario() -> None:
+            client = FakeClient(
+                json.dumps(
+                    {
+                        "message": "Use generated keywords.",
+                        "operations": [
+                            {"op": "set", "path": "keywords", "value": ["ai", "metadata"]}
+                        ],
+                    }
+                )
             )
-        )
-        form = AIForm(
-            steps=single_step(
-                fields.Textarea("abstract"),
-                fields.Tags("keywords"),
-            ),
-            actions=save_actions(),
-            ai=AIConfig(client=client, model="test-model"),
-        )
-        form.ai.assist(
-            id="suggest_keywords",
-            label="Suggest keywords",
-            watch=["abstract"],
-            trigger=WhenIdle(ms=10),
-            prompt="Suggest keywords for {{ values.abstract }}",
-            outputs={"keywords": "A list of keywords"},
-        )
+            form = AIForm(
+                steps=single_step(
+                    fields.Textarea("abstract"),
+                    fields.Tags("keywords"),
+                ),
+                actions=save_actions(),
+                ai=AIConfig(client=client, model="test-model"),
+            )
+            form.ai.assist(
+                id="suggest_keywords",
+                label="Suggest keywords",
+                watch=["abstract"],
+                trigger=WhenIdle(ms=10),
+                prompt="Suggest keywords for {{ values.abstract }}",
+                outputs={"keywords": "A list of keywords"},
+            )
+            form.widget()
 
-        form.set_value("abstract", "This dataset contains notebook metadata.")
-        self.assertEqual(form.proposals, [])
+            form.set_value("abstract", "This dataset contains notebook metadata.")
+            self.assertEqual(form.proposals, [])
 
-        time.sleep(0.05)
+            await asyncio.sleep(0.05)
 
-        self.assertEqual(form.get_value("keywords"), [])
-        self.assertEqual(len(form.proposals), 1)
-        self.assertEqual(form.proposals[0].operations[0].value, ["ai", "metadata"])
-        self.assertEqual(client.responses.calls[0]["model"], "test-model")
-        self.assertEqual(client.responses.calls[0]["tool_choice"]["name"], "propose_form_update")
-        self.assertEqual(client.responses.calls[0]["tools"][0]["name"], "propose_form_update")
+            self.assertEqual(form.get_value("keywords"), [])
+            self.assertEqual(len(form.proposals), 1)
+            self.assertEqual(form.proposals[0].operations[0].value, ["ai", "metadata"])
+            self.assertEqual(client.responses.calls[0]["model"], "test-model")
+            self.assertEqual(client.responses.calls[0]["tool_choice"]["name"], "propose_form_update")
+            self.assertEqual(client.responses.calls[0]["tools"][0]["name"], "propose_form_update")
+
+        asyncio.run(scenario())
 
     def test_ai_assist_schema_does_not_use_untyped_array_items(self) -> None:
         client = FakeClient('{"message": "", "operations": []}')
@@ -245,7 +257,7 @@ class AITests(unittest.TestCase):
             outputs={"keywords": "Keywords"},
         )
         form.widget()
-        form.set_value("abstract", "Text")
+        self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
 
         with self.assertLogs("aipywidgets.form", level="ERROR") as logs:
             with self.assertRaisesRegex(RuntimeError, "upstream unavailable"):
@@ -321,7 +333,7 @@ class AITests(unittest.TestCase):
             outputs={"keywords": "Keywords"},
         )
         form.widget()
-        form.set_value("abstract", "Text")
+        self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
         form.create_proposal("suggest_keywords")
 
         form.reject_proposal(0)
@@ -357,7 +369,7 @@ class AITests(unittest.TestCase):
             outputs={"keywords": "Keywords"},
         )
         form.widget()
-        form.set_value("abstract", "Text")
+        self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
         form.create_proposal("suggest_keywords")
         form.reject_proposal(0)
         input_widget = form._assist_chat_inputs["suggest_keywords"]
@@ -409,7 +421,7 @@ class AITests(unittest.TestCase):
             outputs={"keywords": "Keywords"},
         )
         form.widget()
-        form.set_value("abstract", "Text")
+        self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
         form.create_proposal("suggest_keywords")
 
         form.accept_proposal(0)
@@ -522,7 +534,7 @@ class AITests(unittest.TestCase):
         )
         rendered = form.widget()
 
-        form.set_value("abstract", "Text")
+        self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
 
         abstract_shell = rendered.children[2].children[0]
         self.assertIs(abstract_shell.children[0], form._widgets["abstract"])

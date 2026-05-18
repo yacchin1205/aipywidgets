@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass
-from threading import Timer
 from typing import Any
 
 from .field_path import parse_field_path
@@ -63,7 +63,7 @@ class AIAssistManager:
         self._assists: dict[str, AIAssist] = {}
         self._watch_index: dict[str, list[str]] = {}
         self._dirty: set[str] = set()
-        self._timers: dict[str, Timer] = {}
+        self._timers: dict[str, Any] = {}
 
     def assist(
         self,
@@ -135,11 +135,13 @@ class AIAssistManager:
             existing.cancel()
         if not self._form._assist_is_ready(assist_id):
             return
+        if self._form._root_widget is None:
+            logger.warning("Cannot schedule AI assist before widget() is rendered: %s", assist_id)
+            return
         assist = self.get(assist_id)
-        timer = Timer(assist.trigger.ms / 1000, self._run_scheduled, args=[assist_id])
-        timer.daemon = True
-        self._timers[assist_id] = timer
-        timer.start()
+        loop = asyncio.get_running_loop()
+        handle = loop.call_later(assist.trigger.ms / 1000, self._run_scheduled, assist_id)
+        self._timers[assist_id] = handle
 
     def _run_scheduled(self, assist_id: str) -> None:
         try:
