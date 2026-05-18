@@ -1,0 +1,8 @@
+name: aipywidgets-binder
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - jupyterlab>=4.0
+  - nodejs=22
+  - pip

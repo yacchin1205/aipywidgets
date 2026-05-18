@@ -1,4 +1,5 @@
 #!/bin/bash
 set -eux
 
-pip install ".[ai]"
+pip install hatchling hatch-jupyter-builder hatch-vcs
+pip install --no-build-isolation ".[ai]"
