@@ -546,6 +546,38 @@ class AITests(unittest.TestCase):
         self.assertNotIn("aipy-assist-proposal-wrap {\n  top:", bubble.children[0].value)
         self.assertNotIn("aipy-assist-proposal-wrap::before", bubble.children[0].value)
         self.assertEqual(len(form._assist_layer_widget.children), 1)
+        self.assertEqual(form._assist_layer_widget.placement, "right")
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_ai_assist_bubble_moves_below_full_width_field(self) -> None:
+        client = FakeClient(
+            json.dumps(
+                {
+                    "message": "Use generated keywords.",
+                    "operations": [{"op": "set", "path": "keywords", "value": ["new"]}],
+                }
+            )
+        )
+        form = AIForm(
+            steps=single_step(fields.Textarea("abstract", full_width=True), fields.Tags("keywords")),
+            actions=save_actions(),
+            ai=AIConfig(client=client, model="test-model"),
+        )
+        form.ai.assist(
+            id="suggest_keywords",
+            label="Suggest keywords",
+            watch=["abstract"],
+            trigger=WhenIdle(ms=100000),
+            prompt="Suggest",
+            outputs={"keywords": "Keywords"},
+        )
+        form.widget()
+
+        self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
+
+        self.assertEqual(form._assist_layer_widget.placement, "below")
+        self.assertIn("aipy-assist-bubble-below::before", form._assist_css())
+        self.assertIn("--aipy-assist-arrow-left", form._assist_css())
 
     def test_ai_config_requires_explicit_client(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "AIConfig.client is required"):

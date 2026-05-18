@@ -634,7 +634,7 @@ class AIForm:
 
         self._clear_assist_surfaces(except_path=attention_path)
         self._assist_layer_widget.anchor_dom_class = self._anchor_dom_class(attention_path)
-        self._assist_layer_widget.placement = "right"
+        self._assist_layer_widget.placement = self._assist_placement_for_path(attention_path)
         state = self._assist_state.get(assist_id)
         if state == "waiting":
             self._assist_layer_widget.children = (
@@ -725,6 +725,12 @@ class AIForm:
             return
         if except_path is None:
             self._assist_layer_widget.children = ()
+
+    def _assist_placement_for_path(self, path: str) -> str:
+        field = self._field_defs.get(path)
+        if field is not None and field.full_width:
+            return "below"
+        return "right"
 
     def _assist_bubble(self, children: list[Any], *, proposal: bool = False):
         import ipywidgets as widgets
@@ -943,6 +949,19 @@ class AIForm:
   border-bottom: 1px solid #d1d5db;
   transform: rotate(45deg);
   box-shadow: -4px 4px 8px rgba(15, 23, 42, 0.06);
+}
+.aipy-assist-bubble-wrap.aipy-assist-bubble-below::before {
+  left: calc(var(--aipy-assist-arrow-left, 32px) - 7px);
+  top: -8px;
+  border-left: 1px solid #d1d5db;
+  border-bottom: 0;
+  border-right: 0;
+  border-top: 1px solid #d1d5db;
+  box-shadow: -3px -3px 6px rgba(15, 23, 42, 0.05);
+}
+.aipy-assist-bubble-wrap.aipy-assist-bubble-below {
+  margin-top: 2px;
+  box-shadow: -4px -4px 8px rgba(15, 23, 42, 0.06);
 }
 @media (max-width: 900px) {
   .aipy-assist-bubble-wrap {
