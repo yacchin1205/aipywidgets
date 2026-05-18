@@ -5,6 +5,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+import ipywidgets as widgets
+
+from .field_path import PathPart
+
 
 @dataclass
 class Field:
@@ -16,9 +20,10 @@ class Field:
     validator: Callable[[Any, dict[str, Any]], str | None] | None = None
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.Text(description=self.label or self.id, value=self.default or "")
+
+    def render(self, form, path: str):
+        return form._render_leaf_field(self, path)
 
     def empty_value(self) -> Any:
         return self.default
@@ -41,6 +46,23 @@ class Field:
             return len(value) == 0
         return False
 
+    def validate_path(self, form, path: str) -> dict[str, str]:
+        error = self.validate(form.get_value(path), form.get_values())
+        if error is None:
+            return {}
+        return {path: error}
+
+    def validate_tree(self, form, path: str) -> dict[str, str]:
+        return self.validate_path(form, path)
+
+    def validate_schema(self, validate_fields: Callable[[list["Field"], str], None], owner: str) -> None:
+        return None
+
+    def field_at_parts(self, parts: list[PathPart]) -> "Field":
+        if parts:
+            raise ValueError(f"Path does not resolve inside field {self.id!r}: {parts!r}")
+        return self
+
 
 @dataclass
 class Text(Field):
@@ -48,8 +70,6 @@ class Text(Field):
         return self.default or ""
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.Text(description=self.label or self.id, value=self.default or "")
 
 
@@ -59,8 +79,6 @@ class Textarea(Field):
         return self.default or ""
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.Textarea(description=self.label or self.id, value=self.default or "")
 
 
@@ -69,8 +87,6 @@ class Int(Field):
     default: int = 0
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.IntText(description=self.label or self.id, value=self.default)
 
 
@@ -79,8 +95,6 @@ class Float(Field):
     default: float = 0.0
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.FloatText(description=self.label or self.id, value=self.default)
 
 
@@ -89,8 +103,6 @@ class Checkbox(Field):
     default: bool = False
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.Checkbox(description=self.label or self.id, value=self.default)
 
 
@@ -99,8 +111,6 @@ class Select(Field):
     options: list[str] = field(default_factory=list)
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.Dropdown(description=self.label or self.id, options=self.options, value=self.default)
 
 
@@ -109,8 +119,6 @@ class Tags(Field):
     default: list[str] = field(default_factory=list)
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.TagsInput(
             description=self.label or self.id,
             value=list(self.default),
@@ -121,8 +129,6 @@ class Tags(Field):
 @dataclass
 class File(Field):
     def make_widget(self):
-        import ipywidgets as widgets
-
         return widgets.FileUpload(description=self.label or self.id, multiple=False)
 
     def empty_value(self) -> Any:
@@ -161,12 +167,47 @@ class Object(Field):
         return {child.id: child.empty_value() for child in self.fields}
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         children = [child.make_widget() for child in self.fields]
         if self.label or self.id:
             return widgets.VBox([widgets.HTML(f"<strong>{self.label or self.id}</strong>"), *children])
         return widgets.VBox(children)
+
+    def render(self, form, path: str):
+        heading = widgets.HTML(f"<strong>{self.label or self.id}</strong>")
+        error_widget = widgets.HTML("")
+        form._register_field(path, self, error_widget)
+        children = []
+        for child in self.fields:
+            child_path = f"{path}.{child.id}" if path else child.id
+            children.append(child.render(form, child_path))
+        box = widgets.VBox([heading, error_widget, *children])
+        if self.full_width:
+            box.layout.width = "100%"
+        return box
+
+    def validate_path(self, form, path: str) -> dict[str, str]:
+        return super().validate_path(form, path)
+
+    def validate_tree(self, form, path: str) -> dict[str, str]:
+        errors = self.validate_path(form, path)
+        for child in self.fields:
+            child_path = f"{path}.{child.id}" if path else child.id
+            errors.update(child.validate_tree(form, child_path))
+        return errors
+
+    def validate_schema(self, validate_fields: Callable[[list["Field"], str], None], owner: str) -> None:
+        validate_fields(self.fields, owner=f"object {self.id!r}")
+
+    def field_at_parts(self, parts: list[PathPart]) -> "Field":
+        if not parts:
+            return self
+        head = parts[0]
+        if head.name is None:
+            raise ValueError(f"Object path must continue with a child name: {parts!r}")
+        for child in self.fields:
+            if child.id == head.name:
+                return child.field_at_parts(parts[1:])
+        raise ValueError(f"Unknown object child {head.name!r} in field {self.id!r}")
 
 
 @dataclass
@@ -178,8 +219,81 @@ class Array(Field):
         return deepcopy(self.default)
 
     def make_widget(self):
-        import ipywidgets as widgets
-
         label = widgets.HTML(f"<strong>{self.label or self.id}</strong>")
         note = widgets.HTML("<em>Array editing UI is not implemented yet.</em>")
         return widgets.VBox([label, note])
+
+    def render(self, form, path: str):
+        title = widgets.HTML(f"<strong>{self.label or self.id}</strong>")
+        items_box = widgets.VBox([])
+        add_button = widgets.Button(description="Add", icon="plus")
+        error_widget = widgets.HTML("")
+        form._register_field(path, self, error_widget)
+
+        def render_items() -> None:
+            values = form.get_value(path)
+            if not isinstance(values, list):
+                raise TypeError(f"Array field value must be a list: {path}")
+            item_widgets = []
+            for index, _value in enumerate(values):
+                item_path = f"{path}[{index}]"
+                remove_button = widgets.Button(description="Remove", icon="trash")
+                remove_button.on_click(lambda _button, i=index: remove_item(i))
+                item_widgets.append(
+                    widgets.VBox(
+                        [
+                            widgets.HTML(f"<em>Item {index + 1}</em>"),
+                            self.item.render(form, item_path),
+                            remove_button,
+                        ]
+                    )
+                )
+                if self.full_width:
+                    item_widgets[-1].layout.width = "100%"
+            items_box.children = tuple(item_widgets)
+
+        def add_item(_button) -> None:
+            values = list(form.get_value(path))
+            values.append(self.item.empty_value())
+            form._set_value_without_widget_sync(path, values)
+            render_items()
+
+        def remove_item(index: int) -> None:
+            values = list(form.get_value(path))
+            del values[index]
+            form._set_value_without_widget_sync(path, values)
+            render_items()
+
+        add_button.on_click(add_item)
+        render_items()
+        box = widgets.VBox([title, error_widget, items_box, add_button])
+        if self.full_width:
+            box.layout.width = "100%"
+            items_box.layout.width = "100%"
+        return box
+
+    def validate_path(self, form, path: str) -> dict[str, str]:
+        return super().validate_path(form, path)
+
+    def validate_tree(self, form, path: str) -> dict[str, str]:
+        errors = self.validate_path(form, path)
+        values = form.get_value(path)
+        if not isinstance(values, list):
+            raise TypeError(f"Array field value must be a list: {path}")
+        for index, _value in enumerate(values):
+            item_path = f"{path}[{index}]"
+            errors.update(self.item.validate_tree(form, item_path))
+        return errors
+
+    def validate_schema(self, validate_fields: Callable[[list["Field"], str], None], owner: str) -> None:
+        if self.item is None:
+            raise ValueError(f"Array field requires an item schema: {self.id}")
+        self.item.validate_schema(validate_fields, owner=f"array {self.id!r} item")
+
+    def field_at_parts(self, parts: list[PathPart]) -> "Field":
+        if not parts:
+            return self
+        head = parts[0]
+        if head.index is None:
+            raise ValueError(f"Array path must continue with an index: {parts!r}")
+        return self.item.field_at_parts(parts[1:])

@@ -7,11 +7,13 @@ from dataclasses import dataclass, replace
 from html import escape
 from typing import Any
 
+import ipywidgets as widgets
+
 from .actions import Action
 from .assist_layer import AssistLayer
 from .ai import AIAssistManager, AIConversationRunner, PatchProposal, ToolApprovalProposal
 from .field_path import get_in, parse_field_path, set_in
-from .fields import Array, Field, Object
+from .fields import Field
 
 logger = logging.getLogger(__name__)
 _FORM_RENDER_COUNTER = 0
@@ -128,18 +130,10 @@ class AIForm:
         if path in self._active_hook_paths:
             chain = " -> ".join([*self._active_hook_paths, path])
             raise RuntimeError(f"Cyclic hook update detected: {chain}")
-        set_in(self._values, path, value)
+        self._set_value_without_widget_sync(path, value)
         widget = self._widgets.get(path)
         if widget is not None and hasattr(widget, "value"):
             widget.value = value
-        if path in self._field_defs:
-            error = self._field_defs[path].validate(value, self.get_values())
-            if error is None:
-                self._errors.pop(path, None)
-            else:
-                self._errors[path] = error
-            if path in {field_path for field_path, _field in self._field_entries(self._step_fields(self._current_step_index))}:
-                self._refresh_step_errors()
         self._run_hooks(path, value)
 
     def on_change(self, path: str):
@@ -274,8 +268,6 @@ class AIForm:
         return self.widget()._repr_mimebundle_(**kwargs)
 
     def widget(self):
-        import ipywidgets as widgets
-
         children: list[Any] = []
         if self.title:
             children.append(widgets.HTML(f"<h3>{self.title}</h3>"))
@@ -346,13 +338,7 @@ class AIForm:
             if field.id in seen:
                 raise ValueError(f"Duplicate field id in {owner}: {field.id}")
             seen.add(field.id)
-            if isinstance(field, Object):
-                self._validate_fields(field.fields, owner=f"object {field.id!r}")
-            if isinstance(field, Array):
-                if field.item is None:
-                    raise ValueError(f"Array field requires an item schema: {field.id}")
-                if isinstance(field.item, Object):
-                    self._validate_fields(field.item.fields, owner=f"array {field.id!r} item")
+            field.validate_schema(self._validate_fields, owner)
 
     def _normalize_style(self, style: dict[str, str] | None) -> dict[str, str]:
         if style is None:
@@ -378,49 +364,23 @@ class AIForm:
     def _step_fields(self, step_index: int) -> list[Field]:
         return self.steps[step_index]["fields"]
 
-    def _field_entries(self, fields: list[Field], prefix: str = "") -> list[tuple[str, Field]]:
-        entries: list[tuple[str, Field]] = []
-        for field in fields:
-            path = f"{prefix}.{field.id}" if prefix else field.id
-            entries.append((path, field))
-            if isinstance(field, Object):
-                entries.extend(self._field_entries(field.fields, prefix=path))
-        return entries
-
     def _field_widgets(self, fields: list[Field], prefix: str = "") -> list[Any]:
         widgets = []
         for field in fields:
             path = f"{prefix}.{field.id}" if prefix else field.id
-            widgets.append(self._field_widget(field, path))
+            widgets.append(field.render(self, path))
         return widgets
 
-    def _field_widget(self, field: Field, path: str):
-        import ipywidgets as widgets
-
-        if isinstance(field, Object):
-            heading = widgets.HTML(f"<strong>{field.label or field.id}</strong>")
-            error_widget = widgets.HTML("")
-            self._error_widgets[path] = error_widget
-            self._field_defs[path] = field
-            children = self._field_widgets(field.fields, prefix=path)
-            box = widgets.VBox([heading, error_widget, *children])
-            if field.full_width:
-                box.layout.width = "100%"
-            return box
-
-        if isinstance(field, Array):
-            return self._array_widget(field, path)
-
+    def _render_leaf_field(self, field: Field, path: str):
         widget = field.make_widget()
         if field.full_width:
             widget.layout.width = "calc(100% - 8px)"
         self._sync_widget_value(widget, path)
         self._widgets[path] = widget
-        self._field_defs[path] = field
         if hasattr(widget, "observe"):
             widget.observe(lambda change, p=path: self._on_widget_change(p, change), names="value")
         error_widget = widgets.HTML("")
-        self._error_widgets[path] = error_widget
+        self._register_field(path, field, error_widget)
         shell = widgets.VBox([widget, error_widget], layout=widgets.Layout(overflow="visible"))
         if field.full_width:
             shell.layout.width = "100%"
@@ -429,54 +389,7 @@ class AIForm:
         self._assist_anchors[path] = shell
         return shell
 
-    def _array_widget(self, field: Array, path: str):
-        import ipywidgets as widgets
-
-        title = widgets.HTML(f"<strong>{field.label or field.id}</strong>")
-        items_box = widgets.VBox([])
-        if field.full_width:
-            items_box.layout.width = "100%"
-        add_button = widgets.Button(description="Add", icon="plus")
-        error_widget = widgets.HTML("")
-        self._error_widgets[path] = error_widget
-        self._field_defs[path] = field
-
-        def render_items() -> None:
-            values = self.get_value(path)
-            item_widgets = []
-            for index, _value in enumerate(values):
-                item_path = f"{path}[{index}]"
-                if isinstance(field.item, Object):
-                    item_widgets.append(
-                        widgets.VBox(
-                            [
-                                widgets.HTML(f"<em>Item {index + 1}</em>"),
-                                *self._field_widgets(field.item.fields, prefix=item_path),
-                            ]
-                        )
-                    )
-                    if field.full_width:
-                        item_widgets[-1].layout.width = "100%"
-                else:
-                    item_widgets.append(self._field_widget(field.item, item_path))
-            items_box.children = tuple(item_widgets)
-
-        def add_item(_button) -> None:
-            values = list(self.get_value(path))
-            values.append(field.item.empty_value())
-            set_in(self._values, path, values)
-            render_items()
-
-        add_button.on_click(add_item)
-        render_items()
-        box = widgets.VBox([title, error_widget, items_box, add_button])
-        if field.full_width:
-            box.layout.width = "100%"
-        return box
-
     def _render_current_step(self) -> None:
-        import ipywidgets as widgets
-
         step = self.steps[self._current_step_index]
         label = escape(self._step_title(step))
         self._widgets = {}
@@ -508,8 +421,6 @@ class AIForm:
         self._step_nav_widget.children = tuple(nav_children)
 
     def _actions_widget(self):
-        import ipywidgets as widgets
-
         buttons = []
         for action in self.actions:
             style = "success" if action.style == "primary" else ""
@@ -541,6 +452,14 @@ class AIForm:
             finally:
                 self._active_hook_paths.pop()
         self.ai.mark_changed(path)
+
+    def _register_field(self, path: str, field: Field, error_widget: Any) -> None:
+        self._field_defs[path] = field
+        self._error_widgets[path] = error_widget
+
+    def _set_value_without_widget_sync(self, path: str, value: Any) -> None:
+        set_in(self._values, path, value)
+        self._refresh_field_errors(path)
 
     def _run_action(self, action: Action) -> None:
         if not self._validate_form():
@@ -590,14 +509,15 @@ class AIForm:
         return valid
 
     def _validate_step(self, step_index: int) -> bool:
-        step_paths = {path for path, _field in self._field_entries(self._step_fields(step_index))}
-        for path in step_paths:
+        step_fields = self._step_fields(step_index)
+        for path in self._field_defs:
             self._errors.pop(path, None)
         valid = True
-        for path, field in self._field_entries(self._step_fields(step_index)):
-            error = field.validate(self.get_value(path), self.get_values())
-            if error is not None:
-                self._errors[path] = error
+        for field in step_fields:
+            path = field.id
+            errors = field.validate_tree(self, path)
+            if errors:
+                self._errors.update(errors)
                 valid = False
         if step_index == self._current_step_index:
             self._refresh_step_errors()
@@ -606,7 +526,7 @@ class AIForm:
     def _refresh_step_errors(self) -> None:
         if self._step_summary_widget is None:
             return
-        step_paths = {path for path, _field in self._field_entries(self._step_fields(self._current_step_index))}
+        step_paths = set(self._field_defs)
         step_errors = {path: message for path, message in self._errors.items() if path in step_paths}
         for path, widget in self._error_widgets.items():
             message = step_errors.get(path, "")
@@ -617,6 +537,27 @@ class AIForm:
             self._step_summary_widget.value = f"<div style='color: #b00020;'>{count} {noun} in this step.</div>"
         else:
             self._step_summary_widget.value = ""
+
+    def _refresh_field_errors(self, path: str) -> None:
+        field = self._field_for_path(path)
+        errors = field.validate_tree(self, path)
+        paths_to_clear = [existing_path for existing_path in self._errors if existing_path == path or existing_path.startswith(f"{path}.") or existing_path.startswith(f"{path}[")]
+        for existing_path in paths_to_clear:
+            del self._errors[existing_path]
+        self._errors.update(errors)
+        self._refresh_step_errors()
+
+    def _field_for_path(self, path: str) -> Field:
+        parts = parse_field_path(path)
+        if not parts:
+            raise ValueError("Path must resolve to a field")
+        head = parts[0]
+        if head.name is None:
+            raise ValueError(f"Top-level path must start with a field name: {path!r}")
+        for field in self._all_fields():
+            if field.id == head.name:
+                return field.field_at_parts(parts[1:])
+        raise ValueError(f"Unknown field path: {path!r}")
 
     def _record_ai_event(self, role: str, content: str) -> None:
         self._ai_chat_events.append({"role": role, "content": content})
@@ -663,8 +604,6 @@ class AIForm:
             return
         if self._assist_layer_widget is None:
             return
-
-        import ipywidgets as widgets
 
         self._clear_assist_surfaces(except_path=attention_path)
         self._assist_layer_widget.anchor_dom_class = self._anchor_dom_class(attention_path)
@@ -781,8 +720,6 @@ class AIForm:
         return "right"
 
     def _assist_bubble(self, children: list[Any], *, proposal: bool = False):
-        import ipywidgets as widgets
-
         bubble = widgets.VBox(children, layout=widgets.Layout(width="320px", overflow="visible"))
         bubble.add_class("aipy-assist-bubble-wrap")
         if proposal:
@@ -800,8 +737,6 @@ class AIForm:
         actions: Any | None = None,
         input_disabled: bool,
     ) -> list[Any]:
-        import ipywidgets as widgets
-
         input_widget = widgets.Text(
             placeholder="Add instructions...",
             disabled=input_disabled,

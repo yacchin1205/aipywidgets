@@ -61,6 +61,41 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(form.get_value("authors[0].family_name"), "Lovelace")
 
+    def test_nested_array_object_paths(self) -> None:
+        form = AIForm(
+            steps=single_step(
+                fields.Array(
+                    "sections",
+                    item=fields.Object(
+                        fields=[
+                            fields.Text("title"),
+                            fields.Array(
+                                "authors",
+                                item=fields.Object(
+                                    fields=[
+                                        fields.Text("given_name"),
+                                        fields.Text("family_name"),
+                                    ]
+                                ),
+                                default=[{"given_name": "", "family_name": ""}],
+                            ),
+                        ]
+                    ),
+                    default=[
+                        {
+                            "title": "Main",
+                            "authors": [{"given_name": "", "family_name": ""}],
+                        }
+                    ],
+                )
+            ),
+            actions=save_actions(),
+        )
+
+        form.set_value("sections[0].authors[0].family_name", "Lovelace")
+
+        self.assertEqual(form.get_value("sections[0].authors[0].family_name"), "Lovelace")
+
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_array_rerender_preserves_existing_widget_values(self) -> None:
         form = AIForm(
@@ -93,6 +128,56 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(form._widgets["authors[0].given_name"].value, "Ada")
         self.assertEqual(form._widgets["authors[0].family_name"].value, "Lovelace")
         self.assertEqual(form._widgets["authors[1].given_name"].value, "")
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_nested_array_rerender_preserves_existing_widget_values(self) -> None:
+        form = AIForm(
+            steps=single_step(
+                fields.Array(
+                    "sections",
+                    item=fields.Object(
+                        fields=[
+                            fields.Text("title"),
+                            fields.Array(
+                                "authors",
+                                item=fields.Object(
+                                    fields=[
+                                        fields.Text("given_name"),
+                                        fields.Text("family_name"),
+                                    ]
+                                ),
+                                default=[{"given_name": "Ada", "family_name": "Lovelace"}],
+                            ),
+                        ]
+                    ),
+                    default=[
+                        {
+                            "title": "Main",
+                            "authors": [{"given_name": "Ada", "family_name": "Lovelace"}],
+                        }
+                    ],
+                )
+            ),
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+        sections_widget = root.children[2].children[0]
+        add_section_button = sections_widget.children[3]
+        first_section_widget = sections_widget.children[2].children[0]
+        nested_array_widget = first_section_widget.children[1].children[3]
+
+        self.assertEqual(form._widgets["sections[0].authors[0].given_name"].value, "Ada")
+        self.assertEqual(form._widgets["sections[0].authors[0].family_name"].value, "Lovelace")
+
+        add_author_button = nested_array_widget.children[3]
+        add_author_button.click()
+        add_section_button.click()
+
+        self.assertEqual(form.get_value("sections[0].authors[0].given_name"), "Ada")
+        self.assertEqual(form._widgets["sections[0].authors[0].given_name"].value, "Ada")
+        self.assertEqual(form._widgets["sections[0].authors[0].family_name"].value, "Lovelace")
+        self.assertEqual(form._widgets["sections[0].authors[1].given_name"].value, "")
 
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_next_button_validates_required_fields_before_advancing(self) -> None:
