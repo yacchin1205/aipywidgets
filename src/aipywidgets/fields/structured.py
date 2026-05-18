@@ -48,14 +48,14 @@ class Object(Field):
             return widgets.VBox([widgets.HTML(f"<strong>{self.label or self.id}</strong>"), *children])
         return widgets.VBox(children)
 
-    def render(self, form, path: str):
+    def render(self, form, path: str, allocation, grid):
         heading = widgets.HTML(f"<strong>{self.label or self.id}</strong>")
         error_widget = widgets.HTML("")
         form._register_field(path, self, error_widget)
         children = []
         for child in self.fields:
             child_path = f"{path}.{child.id}" if path else child.id
-            children.append(child.render(form, child_path))
+            children.append(child.render(form, child_path, type(allocation)(start=1, span=grid.columns), grid))
         box = widgets.VBox([heading, error_widget, *children])
         if self.full_width:
             box.layout.width = "100%"
@@ -70,6 +70,19 @@ class Object(Field):
 
     def validate_schema(self, validate_fields: Callable[[list["Field"], str], None], owner: str) -> None:
         validate_fields(self.fields, owner=f"object {self.id!r}")
+        if self.default is not None:
+            self._validate_default_value(self.default, self.id or owner)
+
+    def _validate_default_value(self, value: Any, path: str) -> None:
+        if not isinstance(value, dict):
+            raise TypeError(f"Object field default must be a dict: {path}")
+        for child in self.fields:
+            if not child.stores_value():
+                continue
+            if child.id not in value:
+                raise ValueError(f"Missing object field default for {path}.{child.id}")
+            child_path = f"{path}.{child.id}" if path else child.id
+            child._validate_default_value(value[child.id], child_path)
 
     def field_at_parts(self, parts: list[PathPart]) -> Field:
         if not parts:
@@ -96,7 +109,7 @@ class Array(Field):
         note = widgets.HTML("<em>Array editing UI is not implemented yet.</em>")
         return widgets.VBox([label, note])
 
-    def render(self, form, path: str):
+    def render(self, form, path: str, allocation, grid):
         title = widgets.HTML(f"<strong>{self.label or self.id}</strong>")
         items_box = widgets.VBox([])
         add_button = widgets.Button(description="Add", icon="plus")
@@ -116,7 +129,7 @@ class Array(Field):
                     widgets.VBox(
                         [
                             widgets.HTML(f"<em>Item {index + 1}</em>"),
-                            self.item.render(form, item_path),
+                            self.item.render(form, item_path, type(allocation)(start=1, span=grid.columns), grid),
                             remove_button,
                         ]
                     )
@@ -159,6 +172,15 @@ class Array(Field):
         if self.item is None:
             raise ValueError(f"Array field requires an item schema: {self.id}")
         self.item.validate_schema(validate_fields, owner=f"array {self.id!r} item")
+        self._validate_default_value(self.default, self.id or owner)
+
+    def _validate_default_value(self, value: Any, path: str) -> None:
+        if not isinstance(value, list):
+            raise TypeError(f"Array field default must be a list: {path}")
+        if self.item is None:
+            raise ValueError(f"Array field requires an item schema: {self.id}")
+        for index, item_value in enumerate(value):
+            self.item._validate_default_value(item_value, f"{path}[{index}]")
 
     def field_at_parts(self, parts: list[PathPart]) -> Field:
         if not parts:

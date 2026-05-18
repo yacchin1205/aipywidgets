@@ -23,6 +23,12 @@ def save_actions():
     return [Action(id="save", label="Save")]
 
 
+def walk_widgets(widget):
+    yield widget
+    for child in getattr(widget, "children", ()):
+        yield from walk_widgets(child)
+
+
 class FakeResponses:
     def __init__(self, output_text: str) -> None:
         self.output_text = output_text
@@ -692,8 +698,7 @@ class AITests(unittest.TestCase):
         self._set_value_in_running_loop(form, "abstract", "Text", cancel_assist_id="suggest_keywords")
 
         abstract_shell = rendered.children[2].children[0]
-        self.assertIs(abstract_shell.children[0], form._widgets["abstract"])
-        self.assertEqual(len(abstract_shell.children), 2)
+        self.assertIn(form._widgets["abstract"], tuple(walk_widgets(abstract_shell)))
         bubble = form._assist_layer_widget.children[0]
         self.assertIn("aipy-assist-bubble-wrap", bubble._dom_classes)
         self.assertIn("AI will suggest", bubble.children[0].value)

@@ -54,7 +54,7 @@ class LocalFileSelect(Field):
             if candidate.is_dir() and not relative_path.endswith("/"):
                 raise ValueError(f"LocalFileSelect directory entries must end with '/': {relative_path}")
 
-    def render(self, form, path: str):
+    def render(self, form, path: str, allocation, grid):
         title = widgets.HTML(f"{self._css()}<strong>{escape(self.label or self.id)}</strong>")
         error_widget = widgets.HTML("")
         summary_widget = widgets.HTML("")

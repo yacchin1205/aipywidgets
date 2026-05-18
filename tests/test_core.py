@@ -103,6 +103,24 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(form.get_value("sections[0].authors[0].family_name"), "Lovelace")
 
+    def test_array_object_default_requires_complete_item_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"Missing object field default for authors\[0\]\.given_name"):
+            AIForm(
+                steps=single_step(
+                    fields.Array(
+                        "authors",
+                        item=fields.Object(
+                            fields=[
+                                fields.Text("given_name"),
+                                fields.Text("family_name"),
+                            ]
+                        ),
+                        default=[{}],
+                    )
+                ),
+                actions=save_actions(),
+            )
+
     @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
     def test_array_rerender_preserves_existing_widget_values(self) -> None:
         form = AIForm(
@@ -124,7 +142,7 @@ class CoreTests(unittest.TestCase):
 
         root = form.widget()
         array_widget = root.children[2].children[0]
-        add_button = array_widget.children[3]
+        add_button = next(widget for widget in walk_widgets(array_widget) if type(widget).__name__ == "Button" and widget.description == "Add")
 
         self.assertEqual(form._widgets["authors[0].given_name"].value, "Ada")
         self.assertEqual(form._widgets["authors[0].family_name"].value, "Lovelace")
@@ -170,14 +188,14 @@ class CoreTests(unittest.TestCase):
 
         root = form.widget()
         sections_widget = root.children[2].children[0]
-        add_section_button = sections_widget.children[3]
-        first_section_widget = sections_widget.children[2].children[0]
-        nested_array_widget = first_section_widget.children[1].children[3]
+        add_section_button = next(widget for widget in walk_widgets(sections_widget) if type(widget).__name__ == "Button" and widget.description == "Add")
+        first_section_widget = next(widget for widget in walk_widgets(sections_widget) if type(widget).__name__ == "VBox" and any(getattr(child, "value", "") == "<em>Item 1</em>" for child in getattr(widget, "children", ())))
+        nested_array_widget = next(widget for widget in walk_widgets(first_section_widget) if type(widget).__name__ == "VBox" and any(type(child).__name__ == "Button" and child.description == "Add" for child in getattr(widget, "children", ())))
 
         self.assertEqual(form._widgets["sections[0].authors[0].given_name"].value, "Ada")
         self.assertEqual(form._widgets["sections[0].authors[0].family_name"].value, "Lovelace")
 
-        add_author_button = nested_array_widget.children[3]
+        add_author_button = next(widget for widget in walk_widgets(nested_array_widget) if type(widget).__name__ == "Button" and widget.description == "Add")
         add_author_button.click()
         add_section_button.click()
 
@@ -302,7 +320,7 @@ class CoreTests(unittest.TestCase):
         root = form.widget()
         shell = root.children[2].children[0]
 
-        self.assertEqual(form._widgets["title"].layout.width, "calc(100% - 8px)")
+        self.assertEqual(form._widgets["title"].layout.width, "100%")
         self.assertEqual(shell.layout.width, "100%")
 
     def test_hook_updates_values(self) -> None:
@@ -419,6 +437,23 @@ class CoreTests(unittest.TestCase):
         )
 
         self.assertEqual(form.get_values(), {"title": ""})
+
+    def test_display_only_full_width_fields_clear_default_widget_margin(self) -> None:
+        form = AIForm(
+            steps=single_step(
+                fields.Headline("headline", content="Section", full_width=True),
+                fields.Expression("note", content="Description", full_width=True),
+                fields.HorizontalLine("hr", full_width=True),
+            ),
+            actions=save_actions(),
+        )
+
+        root = form.widget()
+        step_body = root.children[2]
+        for row in step_body.children:
+            widget = row.children[0].children[0]
+            self.assertEqual(widget.layout.margin, "0")
+            self.assertEqual(row.layout.width, "100%")
 
     def test_local_file_select_requires_existing_root_directory(self) -> None:
         with self.assertRaisesRegex(ValueError, "root_path does not exist"):

@@ -19,6 +19,21 @@ logger = logging.getLogger(__name__)
 _FORM_RENDER_COUNTER = 0
 
 
+@dataclass(frozen=True)
+class GridSpec:
+    columns: int = 12
+    label_units: int = 3
+    column_gap: str = "12px"
+    row_gap: str = "6px"
+    inline_threshold_units: int = 8
+
+
+@dataclass(frozen=True)
+class FieldAllocation:
+    start: int
+    span: int
+
+
 @dataclass
 class HookContext:
     form: "AIForm"
@@ -119,6 +134,7 @@ class AIForm:
         self._message_widget = None
         self._root_widget = None
         self._assist_layer_widget = None
+        self._grid = GridSpec()
 
     def get_values(self) -> dict[str, Any]:
         return self._values
@@ -364,30 +380,68 @@ class AIForm:
     def _step_fields(self, step_index: int) -> list[Field]:
         return self.steps[step_index]["fields"]
 
-    def _field_widgets(self, fields: list[Field], prefix: str = "") -> list[Any]:
-        widgets = []
-        for field in fields:
-            path = f"{prefix}.{field.id}" if prefix else field.id
-            widgets.append(field.render(self, path))
-        return widgets
+    def _field_widgets(self, step: dict[str, Any], prefix: str = "") -> list[Any]:
+        rows = step.get("layout")
+        if rows is None:
+            rows = [[field] for field in step["fields"]]
+        rendered = []
+        for row in rows:
+            allocations = self._row_allocations(row)
+            row_children = []
+            for item, allocation in zip(row, allocations, strict=True):
+                field = item["field"] if isinstance(item, dict) else item
+                path = f"{prefix}.{field.id}" if prefix else field.id
+                widget = field.render(self, path, allocation, self._grid)
+                cell = widgets.Box(
+                    [widget],
+                    layout=widgets.Layout(
+                        width="auto",
+                        min_width="0",
+                        flex=f"{allocation.span} {allocation.span} 0",
+                        overflow="visible",
+                    ),
+                )
+                row_children.append(cell)
+            row_widget = widgets.HBox(
+                row_children,
+                layout=widgets.Layout(
+                    width="100%",
+                    align_items="flex-start",
+                    overflow="visible",
+                ),
+            )
+            row_widget.add_class("aipy-form-row")
+            rendered.append(row_widget)
+        return rendered
 
-    def _render_leaf_field(self, field: Field, path: str):
-        widget = field.make_widget()
-        if field.full_width:
-            widget.layout.width = "calc(100% - 8px)"
-        self._sync_widget_value(widget, path)
-        self._widgets[path] = widget
-        if hasattr(widget, "observe"):
-            widget.observe(lambda change, p=path: self._on_widget_change(p, change), names="value")
-        error_widget = widgets.HTML("")
-        self._register_field(path, field, error_widget)
-        shell = widgets.VBox([widget, error_widget], layout=widgets.Layout(overflow="visible"))
-        if field.full_width:
-            shell.layout.width = "100%"
-        shell.add_class("aipy-field-shell")
-        shell.add_class(self._anchor_dom_class(path))
-        self._assist_anchors[path] = shell
-        return shell
+    def _row_allocations(self, row: list[Any]) -> list[FieldAllocation]:
+        if not row:
+            return []
+        explicit_spans = []
+        auto_items = 0
+        for item in row:
+            if isinstance(item, dict) and "span" in item:
+                explicit_spans.append(int(item["span"]))
+            else:
+                explicit_spans.append(None)
+                auto_items += 1
+        used = sum(span for span in explicit_spans if span is not None)
+        if used > self._grid.columns:
+            raise ValueError(f"Row spans exceed grid width: {used} > {self._grid.columns}")
+        remaining = self._grid.columns - used
+        auto_span = remaining // auto_items if auto_items else 0
+        remainder = remaining % auto_items if auto_items else 0
+        allocations: list[FieldAllocation] = []
+        start = 1
+        for span in explicit_spans:
+            if span is None:
+                span = auto_span
+                if remainder:
+                    span += 1
+                    remainder -= 1
+            allocations.append(FieldAllocation(start=start, span=span))
+            start += span
+        return allocations
 
     def _render_current_step(self) -> None:
         step = self.steps[self._current_step_index]
@@ -403,7 +457,7 @@ class AIForm:
         self._step_title_widget.value = (
             f"<h4>Step {self._current_step_index + 1} of {len(self.steps)}: {label}</h4>"
         )
-        self._step_body_widget.children = tuple(self._field_widgets(step["fields"]))
+        self._step_body_widget.children = tuple(self._field_widgets(step))
         self._refresh_step_errors()
         nav_children = []
         if self._current_step_index > 0:
