@@ -304,7 +304,7 @@ class AIForm:
         return root
 
     def _initial_values(self) -> dict[str, Any]:
-        return {field.id: field.empty_value() for field in self._all_fields()}
+        return {field.id: field.empty_value() for field in self._all_fields() if field.stores_value()}
 
     def _validate_schema(self) -> None:
         step_ids: set[str] = set()
@@ -714,8 +714,8 @@ class AIForm:
             self._assist_layer_widget.children = ()
 
     def _assist_placement_for_path(self, path: str) -> str:
-        field = self._field_defs.get(path)
-        if field is not None and field.full_width:
+        field = self._field_defs[path]
+        if field.full_width:
             return "below"
         return "right"
 

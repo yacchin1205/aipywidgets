@@ -4,6 +4,7 @@ import sys
 import unittest
 import importlib.util
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -16,6 +17,12 @@ def single_step(*step_fields):
 
 def save_actions():
     return [Action(id="save", label="Save")]
+
+
+def walk_widgets(widget):
+    yield widget
+    for child in getattr(widget, "children", ()):
+        yield from walk_widgets(child)
 
 
 class CoreTests(unittest.TestCase):
@@ -400,6 +407,80 @@ class CoreTests(unittest.TestCase):
             @form.on_action("save")
             def save_again(ctx):
                 raise AssertionError("should not register")
+
+    def test_display_only_fields_do_not_add_values(self) -> None:
+        form = AIForm(
+            steps=single_step(
+                fields.Headline("headline", content="Section"),
+                fields.Expression("note", content="Description"),
+                fields.Text("title"),
+            ),
+            actions=save_actions(),
+        )
+
+        self.assertEqual(form.get_values(), {"title": ""})
+
+    def test_local_file_select_requires_existing_root_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "root_path does not exist"):
+            AIForm(
+                steps=single_step(fields.LocalFileSelect("files", root_path="/path/that/does/not/exist")),
+                actions=save_actions(),
+            )
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_local_file_select_returns_relative_paths(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "data").mkdir()
+            (root / "data" / "sub").mkdir()
+            (root / "data" / "sub" / "alpha.txt").write_text("alpha", encoding="utf-8")
+            (root / "beta.txt").write_text("beta", encoding="utf-8")
+            form = AIForm(
+                steps=single_step(fields.LocalFileSelect("files", root_path=str(root), full_width=True)),
+                actions=save_actions(),
+            )
+
+            root_widget = form.widget()
+            file_select = root_widget.children[2].children[0]
+            form.set_value("files", ["data/"])
+            checkboxes = [widget for widget in walk_widgets(file_select) if type(widget).__name__ == "Checkbox"]
+
+            checkboxes[0].value = True
+            checkboxes[-1].value = True
+
+            self.assertEqual(form.get_value("files"), ["beta.txt", "data/"])
+
+    @unittest.skipIf(importlib.util.find_spec("ipywidgets") is None, "ipywidgets is not installed")
+    def test_local_file_select_expands_selected_ancestors_on_set_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "data").mkdir()
+            (root / "data" / "sub").mkdir()
+            (root / "data" / "sub" / "alpha.txt").write_text("alpha", encoding="utf-8")
+            form = AIForm(
+                steps=single_step(fields.LocalFileSelect("files", root_path=str(root), full_width=True)),
+                actions=save_actions(),
+            )
+
+            root_widget = form.widget()
+            file_select = root_widget.children[2].children[0]
+
+            form.set_value("files", ["data/sub/"])
+
+            checkboxes = [widget for widget in walk_widgets(file_select) if type(widget).__name__ == "Checkbox"]
+            self.assertEqual(len(checkboxes), 3)
+            self.assertTrue(checkboxes[1].value)
+            self.assertFalse(checkboxes[2].value)
+
+    def test_local_file_select_directory_default_requires_trailing_slash(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "data").mkdir()
+            with self.assertRaisesRegex(ValueError, "must end with '/'"):
+                AIForm(
+                    steps=single_step(fields.LocalFileSelect("files", root_path=str(root), default=["data"])),
+                    actions=save_actions(),
+                )
 
 
 if __name__ == "__main__":

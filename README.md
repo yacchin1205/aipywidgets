@@ -212,11 +212,19 @@ Primitive fields include:
 - `fields.File`
 - `fields.Select`
 - `fields.Tags`
+- `fields.LocalFileSelect`: a local directory tree with expandable folders and file checkboxes
 
 Structured fields include:
 
 - `fields.Array`: a repeated list of items
 - `fields.Object`: a dictionary-like group of named child fields
+
+Display-only fields include:
+
+- `fields.Expression`
+- `fields.Headline`
+- `fields.HeadlineWithLine`
+- `fields.HorizontalLine`
 
 For example, a paper author list can be represented as an array of objects:
 
@@ -263,6 +271,19 @@ The resulting form values should be plain Python data structures:
         "url": "https://creativecommons.org/licenses/by/4.0/",
     },
 }
+
+`LocalFileSelect` returns relative paths from the configured root directory:
+
+```python
+import os
+
+fields.LocalFileSelect(
+    "selected_files",
+    label="Files",
+    root_path=os.environ["AIPYWIDGETS_FILE_SELECTOR_ROOT"],
+    full_width=True,
+)
+```
 ```
 
 ## Field Paths
