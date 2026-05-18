@@ -54,11 +54,11 @@ def _fetch_url_text_tool() -> AIAssistTool:
                     "description": "Whether the model should summarize the fetched text after approval. Defaults to true.",
                 },
                 "focus": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": "Optional focus hint for the later summary.",
                 },
             },
-            "required": ["url"],
+            "required": ["url", "summarize", "focus"],
             "additionalProperties": False,
         },
         proposal_builder=_build_fetch_url_text_proposal,

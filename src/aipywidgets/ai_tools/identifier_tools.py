@@ -31,7 +31,7 @@ def _resolve_identifier_metadata_tool() -> AIAssistTool:
                     "description": "A short reason for resolving this identifier now.",
                 },
                 "preferredSources": {
-                    "type": "array",
+                    "type": ["array", "null"],
                     "items": {
                         "type": "string",
                         "enum": list(_IDENTIFIER_SOURCES),
@@ -39,7 +39,7 @@ def _resolve_identifier_metadata_tool() -> AIAssistTool:
                     "description": "Optional source order override.",
                 },
             },
-            "required": ["identifier", "reason"],
+            "required": ["identifier", "reason", "preferredSources"],
             "additionalProperties": False,
         },
         proposal_builder=_build_identifier_proposal,
